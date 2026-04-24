@@ -5,6 +5,7 @@
   },
   "nav": {
     "wiki": "Wiki",
+    "ingest": "Ingest",
     "sources": "Sources",
     "search": "Search",
     "graph": "Graph",

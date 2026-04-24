@@ -180,12 +180,30 @@ function SaveToWikiButton({ content, visible }: { content: string; visible: bool
         `type: query`,
         `title: "${title.replace(/"/g, '\\"')}"`,
         `created: ${date}`,
+        `source_signal: conversation_saved`,
         `tags: []`,
         "---",
         "",
       ].join("\n")
 
       await writeFile(filePath, frontmatter + cleanContent)
+
+      // Conversation crystallization: also write a synthesis session page
+      // so high-value chat outputs accumulate in wiki/synthesis/sessions.
+      const sessionFileName = `session-${slug}-${date}.md`
+      const sessionFilePath = `${pp}/wiki/synthesis/sessions/${sessionFileName}`
+      const sessionFrontmatter = [
+        "---",
+        `type: synthesis`,
+        `title: "${title.replace(/"/g, '\\"')}"`,
+        `created: ${date}`,
+        `source_signal: conversation_crystallized`,
+        `sources: ["queries/${fileName}"]`,
+        `tags: [session]`,
+        "---",
+        "",
+      ].join("\n")
+      await writeFile(sessionFilePath, sessionFrontmatter + cleanContent)
 
       // Update index.md — append under ## Queries section
       const indexPath = `${pp}/wiki/index.md`

@@ -763,6 +763,70 @@ async function tryReadFile(path: string): Promise<string> {
   }
 }
 
+function extractFrontmatter(content: string): { body: string; frontmatter: string | null } {
+  if (!content.startsWith("---\n")) return { body: content, frontmatter: null }
+  const end = content.indexOf("\n---\n", 4)
+  if (end < 0) return { body: content, frontmatter: null }
+  return {
+    frontmatter: content.slice(4, end),
+    body: content.slice(end + 5),
+  }
+}
+
+function getFrontmatterField(content: string, field: string): string {
+  const { frontmatter } = extractFrontmatter(content)
+  if (!frontmatter) return ""
+  const re = new RegExp(`^${field}:\\s*["']?(.+?)["']?\\s*$`, "m")
+  const m = frontmatter.match(re)
+  return m?.[1]?.trim() ?? ""
+}
+
+function normalizeDedupeKey(raw: string): string {
+  return raw
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+}
+
+function deriveDedupeKey(relativePath: string, content: string): string {
+  const explicit = getFrontmatterField(content, "dedupe_key")
+  if (explicit) return normalizeDedupeKey(explicit)
+  const title = getFrontmatterField(content, "title")
+  if (title) return normalizeDedupeKey(title)
+  const stem = getFileName(relativePath).replace(/\.md$/i, "")
+  return normalizeDedupeKey(stem)
+}
+
+function withDedupeMetadata(content: string, dedupeKey: string, dedupeNote: string): string {
+  const { frontmatter, body } = extractFrontmatter(content)
+  if (!frontmatter) {
+    return [
+      "---",
+      `dedupe_key: "${dedupeKey}"`,
+      `dedupe_note: "${dedupeNote.replace(/"/g, '\\"')}"`,
+      "---",
+      "",
+      content,
+    ].join("\n")
+  }
+
+  const lines = frontmatter.split("\n").filter((line) => !/^dedupe_key:/.test(line) && !/^dedupe_note:/.test(line))
+  lines.push(`dedupe_key: "${dedupeKey}"`)
+  lines.push(`dedupe_note: "${dedupeNote.replace(/"/g, '\\"')}"`)
+  return `---\n${lines.join("\n")}\n---\n${body}`
+}
+
+function flattenMdPaths(nodes: Array<{ path: string; is_dir: boolean; children?: any[] }>): string[] {
+  const out: string[] = []
+  for (const n of nodes) {
+    if (n.is_dir && n.children) out.push(...flattenMdPaths(n.children))
+    else if (!n.is_dir && n.path.endsWith(".md")) out.push(n.path)
+  }
+  return out
+}
+
 export async function startIngest(
   projectPath: string,
   sourcePath: string,
@@ -920,13 +984,52 @@ export async function executeIngestWrites(
   )
 
   const writtenPaths: string[] = []
+  const dedupeRecords: string[] = []
+  const dirMdCache = new Map<string, string[]>()
   const matches = accumulated.matchAll(FILE_BLOCK_REGEX)
 
   for (const match of matches) {
-    const relativePath = match[1].trim()
-    const content = match[2]
+    let relativePath = match[1].trim()
+    let content = match[2]
 
     if (!relativePath) continue
+
+    const isDedupeTarget =
+      relativePath.startsWith("wiki/synthesis/") ||
+      relativePath.startsWith("wiki/comparisons/")
+    if (isDedupeTarget && relativePath.endsWith(".md")) {
+      const incomingKey = deriveDedupeKey(relativePath, content)
+      const dir = relativePath.slice(0, relativePath.lastIndexOf("/"))
+      if (!dirMdCache.has(dir)) {
+        try {
+          const tree = await listDirectory(`${pp}/${dir}`)
+          dirMdCache.set(dir, flattenMdPaths(tree))
+        } catch {
+          dirMdCache.set(dir, [])
+        }
+      }
+      const existingInDir = (dirMdCache.get(dir) ?? []).filter((p) => !p.endsWith(`/${getFileName(relativePath)}`))
+      let matchedPath: string | null = null
+      for (const fullExisting of existingInDir) {
+        const relExisting = fullExisting.startsWith(`${pp}/`) ? fullExisting.slice(pp.length + 1) : fullExisting
+        const existingContent = await tryReadFile(fullExisting)
+        if (!existingContent) continue
+        const existingKey = deriveDedupeKey(relExisting, existingContent)
+        if (existingKey && incomingKey && existingKey === incomingKey) {
+          matchedPath = relExisting
+          break
+        }
+      }
+
+      if (matchedPath) {
+        relativePath = matchedPath
+        content = withDedupeMetadata(content, incomingKey, "dedupe: update_existing_page")
+        dedupeRecords.push(`- ${incomingKey}: update -> ${matchedPath}`)
+      } else {
+        content = withDedupeMetadata(content, incomingKey, "dedupe: create_new_page")
+        dedupeRecords.push(`- ${incomingKey}: create -> ${relativePath}`)
+      }
+    }
 
     const fullPath = `${pp}/${relativePath}`
 
@@ -948,7 +1051,10 @@ export async function executeIngestWrites(
 
   if (writtenPaths.length > 0) {
     const fileList = writtenPaths.map((p) => `- ${p}`).join("\n")
-    getStore().addMessage("system", `Files written to wiki:\n${fileList}`)
+    const dedupeInfo = dedupeRecords.length > 0
+      ? `\n\nDedupe records:\n${dedupeRecords.join("\n")}`
+      : ""
+    getStore().addMessage("system", `Files written to wiki:\n${fileList}${dedupeInfo}`)
   } else {
     getStore().addMessage("system", "No files were written. The LLM response did not contain valid FILE blocks.")
   }

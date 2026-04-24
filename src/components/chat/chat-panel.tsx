@@ -7,7 +7,7 @@ import { useChatStore, chatMessagesToLLM } from "@/stores/chat-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { streamChat, type ChatMessage as LLMMessage } from "@/lib/llm-client"
 import { executeIngestWrites } from "@/lib/ingest"
-import { listDirectory, readFile, deleteFile } from "@/commands/fs"
+import { listDirectory, readFile, deleteFile, createDirectory, writeFile as writeFsFile } from "@/commands/fs"
 import { searchWiki } from "@/lib/search"
 import { buildRetrievalGraph, getRelatedNodes } from "@/lib/graph-relevance"
 import { normalizePath, getFileName, getRelativePath } from "@/lib/path-utils"
@@ -16,6 +16,129 @@ import { isGreeting } from "@/lib/greeting-detector"
 
 // Store the page mapping from the last query so SourceFilesBar can show which pages were cited
 export let lastQueryPages: { title: string; path: string }[] = []
+
+type ReviewCommand = "daily" | "weekly" | "monthly"
+
+function parseReviewCommand(text: string): ReviewCommand | null {
+  const normalized = text.trim()
+  if (normalized === "/每日复盘") return "daily"
+  if (normalized === "/每周复盘") return "weekly"
+  if (normalized === "/每月总结") return "monthly"
+  return null
+}
+
+function parseMomentCommand(text: string): string | null {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith("/此时此刻")) return null
+  const payload = trimmed.slice("/此时此刻".length).trim()
+  return payload
+}
+
+function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function isoWeekLabel(date: Date): string {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+  const dayNum = d.getUTCDay() || 7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum)
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+  const week = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7)
+  return `${d.getUTCFullYear()}-W${String(week).padStart(2, "0")}`
+}
+
+function clockLabel(date: Date): string {
+  const hh = String(date.getHours()).padStart(2, "0")
+  const mm = String(date.getMinutes()).padStart(2, "0")
+  return `${hh}:${mm}`
+}
+
+function momentPagePath(projectPath: string, date: string): string {
+  return `${normalizePath(projectPath)}/wiki/personal-growth/journal/moments-${date}.md`
+}
+
+async function appendMomentEntry(projectPath: string, rawContent: string): Promise<string> {
+  const date = todayIsoDate()
+  const path = momentPagePath(projectPath, date)
+  const now = new Date()
+  const time = clockLabel(now)
+  const header = [
+    "---",
+    "type: note",
+    `title: "此时此刻 ${date}"`,
+    `created: ${date}`,
+    `updated: ${date}`,
+    "source_signal: conversation_crystallized",
+    "status: active",
+    "tags: [moment, journal]",
+    "---",
+    "",
+    `# 此时此刻 ${date}`,
+    "",
+  ].join("\n")
+
+  const existing = await readFile(path).catch(() => "")
+  const section = [
+    `## ${time}`,
+    "",
+    rawContent.trim(),
+    "",
+  ].join("\n")
+
+  const next = existing
+    ? `${existing.trimEnd()}\n\n${section}`
+    : `${header}${section}`
+
+  await createDirectory(`${normalizePath(projectPath)}/wiki/personal-growth/journal`).catch(() => {})
+  await writeFsFile(path, next)
+  return path
+}
+
+async function autoSaveReviewResult(
+  projectPath: string,
+  command: ReviewCommand,
+  content: string,
+): Promise<string> {
+  const pp = normalizePath(projectPath)
+  const now = new Date()
+  const date = todayIsoDate()
+  const ym = date.slice(0, 7)
+  const week = isoWeekLabel(now)
+  const baseDir = command === "daily" ? `${pp}/wiki/personal-growth/journal` : `${pp}/wiki/personal-growth/reflections`
+  await createDirectory(baseDir).catch(() => {})
+
+  const fileName =
+    command === "daily"
+      ? `daily-review-${date}.md`
+      : command === "weekly"
+      ? `weekly-review-${week}.md`
+      : `monthly-summary-${ym}.md`
+
+  const title =
+    command === "daily"
+      ? `每日复盘 ${date}`
+      : command === "weekly"
+      ? `每周复盘 ${week}`
+      : `每月总结 ${ym}`
+
+  const pageType = command === "daily" ? "note" : "synthesis"
+  const frontmatter = [
+    "---",
+    `type: ${pageType}`,
+    `title: "${title}"`,
+    `created: ${date}`,
+    `updated: ${date}`,
+    `source_signal: conversation_crystallized`,
+    `status: active`,
+    `tags: [review]`,
+    "---",
+    "",
+  ].join("\n")
+
+  const targetPath = `${baseDir}/${fileName}`
+  await writeFsFile(targetPath, frontmatter + content.trim() + "\n")
+  return targetPath
+}
 
 function formatDate(timestamp: number): string {
   const d = new Date(timestamp)
@@ -163,6 +286,104 @@ export function ChatPanel() {
 
       addMessage("user", text)
       setStreaming(true)
+
+      const momentPayload = parseMomentCommand(text)
+      if (momentPayload !== null && project) {
+        setStreaming(false)
+        if (!momentPayload) {
+          addMessage("system", "已识别 /此时此刻，但内容为空。请在命令后补充你此刻的记录。")
+          return
+        }
+        try {
+          const written = await appendMomentEntry(project.path, momentPayload)
+          const tree = await listDirectory(normalizePath(project.path))
+          setFileTree(tree)
+          useWikiStore.getState().bumpDataVersion()
+          addMessage("system", `已记录到此时此刻：${written}`)
+        } catch (err) {
+          addMessage("system", `此时此刻记录失败：${err instanceof Error ? err.message : String(err)}`)
+        }
+        return
+      }
+
+      const reviewCommand = parseReviewCommand(text)
+      if (reviewCommand && project) {
+        let notes = ""
+        if (reviewCommand === "daily") {
+          const momentsPath = momentPagePath(project.path, todayIsoDate())
+          notes = await readFile(momentsPath).catch(() => "")
+        }
+        if (!notes) {
+          const activeConvMessages = useChatStore.getState().getActiveMessages()
+            .filter((m) => m.role === "user" || m.role === "assistant")
+          notes = activeConvMessages
+            .filter((m) => m.content.trim() !== "/每日复盘" && m.content.trim() !== "/每周复盘" && m.content.trim() !== "/每月总结")
+            .map((m) => `${m.role === "user" ? "我" : "助手"}: ${m.content}`)
+            .join("\n\n")
+        }
+
+        const cmdTitle =
+          reviewCommand === "daily" ? "每日复盘" : reviewCommand === "weekly" ? "每周复盘" : "每月总结"
+        const templatePath = `${normalizePath(project.path)}/wiki/personal-growth/review-commands.md`
+        const systemPath = `${normalizePath(project.path)}/wiki/personal-growth/review-system.md`
+        const [reviewSystem, reviewCommands] = await Promise.all([
+          readFile(systemPath).catch(() => ""),
+          readFile(templatePath).catch(() => ""),
+        ])
+
+        const controller = new AbortController()
+        abortRef.current = controller
+        let accumulated = ""
+        await streamChat(
+          llmConfig,
+          [
+            {
+              role: "system",
+              content: [
+                "你是用户的复盘诤友。严格按给定模板输出，不要额外解释。",
+                "当记录不足时，也要按模板输出，并在对应字段写“信息不足”。",
+                "追问必须只有一个问题，且不提供答案或建议。",
+                reviewSystem ? `## Review System\n${reviewSystem}` : "",
+                reviewCommands ? `## Review Commands\n${reviewCommands}` : "",
+              ].filter(Boolean).join("\n\n"),
+            },
+            {
+              role: "user",
+              content: [
+                `请执行：${cmdTitle}`,
+                "",
+                "以下是我当前会话里的碎片记录，请据此生成复盘：",
+                notes || "(暂无记录)",
+              ].join("\n"),
+            },
+          ],
+          {
+            onToken: (token) => {
+              accumulated += token
+              appendStreamToken(token)
+            },
+            onDone: async () => {
+              finalizeStream(accumulated)
+              abortRef.current = null
+              try {
+                const written = await autoSaveReviewResult(project.path, reviewCommand, accumulated)
+                const tree = await listDirectory(normalizePath(project.path))
+                setFileTree(tree)
+                useWikiStore.getState().bumpDataVersion()
+                useChatStore.getState().addMessage("system", `复盘已自动保存：${written}`)
+              } catch (err) {
+                useChatStore.getState().addMessage("system", `复盘自动保存失败：${err instanceof Error ? err.message : String(err)}`)
+              }
+            },
+            onError: (err) => {
+              finalizeStream(`Error: ${err.message}`, undefined)
+              abortRef.current = null
+            },
+          },
+          controller.signal,
+        )
+        return
+      }
 
       // Build system prompt with wiki context using graph-enhanced retrieval
       const systemMessages: LLMMessage[] = []
