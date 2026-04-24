@@ -686,9 +686,9 @@ export function ChatPanel() {
           <>
             <div
               ref={scrollContainerRef}
-              className="flex-1 overflow-y-auto px-3 py-2"
+              className="flex-1 overflow-y-auto px-4 py-4"
             >
-              <div className="flex flex-col gap-3">
+              <div className="mx-auto flex w-full max-w-[1040px] flex-col gap-5">
                 {activeMessages.map((msg, idx) => {
                   // Check if this is the last assistant message
                   const isLastAssistant = msg.role === "assistant" &&

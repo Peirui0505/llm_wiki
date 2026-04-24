@@ -79,12 +79,12 @@ export function ChatMessage({ message, isLastAssistant, onRegenerate }: ChatMess
       >
         {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
       </div>
-      <div className="max-w-[80%] flex flex-col gap-1.5">
+      <div className="flex max-w-[78%] flex-col gap-2">
         <div
-          className={`rounded-lg px-3 py-2 text-sm ${
+          className={`rounded-xl px-4 py-3 ${
             isUser
-              ? "bg-primary text-primary-foreground"
-              : "bg-muted text-foreground"
+              ? "bg-primary text-sm leading-7 text-primary-foreground"
+              : "border border-border/70 bg-background text-[15px] leading-6 text-foreground"
           }`}
         >
           {isUser ? (
@@ -95,7 +95,7 @@ export function ChatMessage({ message, isLastAssistant, onRegenerate }: ChatMess
         </div>
         {isAssistant && <CitedReferencesPanel content={message.content} savedReferences={message.references} />}
         {isAssistant && hovered && (
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1.5 px-1">
             <CopyButton content={message.content} />
             <SaveToWikiButton content={message.content} visible={true} />
             {isLastAssistant && onRegenerate && (
@@ -320,11 +320,11 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
   const hasMore = citedPages.length > MAX_COLLAPSED
 
   return (
-    <div className="rounded-md border border-border/60 bg-muted/30 text-xs mb-1">
+    <div className="mb-1 rounded-lg border border-border/70 bg-muted/20 text-xs">
       <button
         type="button"
         onClick={() => hasMore && setExpanded(!expanded)}
-        className="flex w-full items-center gap-1.5 px-2 py-1 text-muted-foreground hover:text-foreground transition-colors"
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-muted-foreground transition-colors hover:text-foreground"
       >
         <FileText className="h-3 w-3 shrink-0" />
         <span className="font-medium">References ({citedPages.length})</span>
@@ -334,7 +334,7 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
             : <ChevronRight className="h-3 w-3 ml-auto" />
         )}
       </button>
-      <div className="px-2 pb-1.5">
+      <div className="px-3 pb-2">
         {visiblePages.map((page, i) => {
           const refType = getRefType(page.path)
           const config = REF_TYPE_CONFIG[refType] ?? REF_TYPE_CONFIG.source
@@ -370,7 +370,7 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
                 // Last resort: set the original path anyway
                 setSelectedFile(`${pp}/${page.path}`)
               }}
-              className="flex w-full items-center gap-1.5 rounded px-1 py-0.5 text-left hover:bg-accent/50 transition-colors"
+              className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left transition-colors hover:bg-accent/50"
               title={page.path}
             >
               <span className="text-[10px] text-muted-foreground/60 w-4 shrink-0 text-right">[{i + 1}]</span>
@@ -479,7 +479,7 @@ export function StreamingMessage({ content }: StreamingMessageProps) {
       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
         <Bot className="h-4 w-4" />
       </div>
-      <div className="max-w-[80%] rounded-lg px-3 py-2 text-sm bg-muted text-foreground">
+      <div className="max-w-[78%] rounded-xl border border-border/70 bg-background px-4 py-3 text-[15px] leading-6 text-foreground">
         {isThinking ? (
           <StreamingThinkingBlock content={thinking} />
         ) : (
@@ -505,11 +505,16 @@ function MarkdownContent({ content }: { content: string }) {
   return (
     <div>
       {thinking && <ThinkingBlock content={thinking} />}
-      <div className="chat-markdown prose prose-sm max-w-none dark:prose-invert prose-p:my-1 prose-headings:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:my-2 prose-code:text-xs prose-code:before:content-none prose-code:after:content-none">
+      <div className="chat-markdown prose prose-sm max-w-none dark:prose-invert prose-p:my-0 prose-p:leading-6 prose-headings:my-6 prose-headings:font-semibold prose-ul:my-5 prose-ol:my-5 prose-li:my-1.5 prose-blockquote:my-6 prose-blockquote:border-l-4 prose-blockquote:border-border prose-blockquote:pl-4 prose-pre:my-6 prose-code:text-[13px] prose-code:before:content-none prose-code:after:content-none">
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[rehypeKatex]}
           components={{
+            p: ({ children, ...props }) => (
+              <p className="my-0 leading-6 [&+p]:mt-6" {...props}>
+                {children}
+              </p>
+            ),
             a: ({ href, children }) => {
               if (href?.startsWith("wikilink:")) {
                 const pageName = href.slice("wikilink:".length)
@@ -522,21 +527,21 @@ function MarkdownContent({ content }: { content: string }) {
               )
             },
             table: ({ children, ...props }) => (
-              <div className="my-2 overflow-x-auto rounded border border-border">
-                <table className="w-full border-collapse text-xs" {...props}>{children}</table>
+              <div className="my-4 overflow-x-auto rounded-lg border border-border bg-background">
+                <table className="w-full border-collapse text-[13px]" {...props}>{children}</table>
               </div>
             ),
             thead: ({ children, ...props }) => (
               <thead className="bg-muted" {...props}>{children}</thead>
             ),
             th: ({ children, ...props }) => (
-              <th className="border border-border/80 px-3 py-1.5 text-left font-semibold bg-muted" {...props}>{children}</th>
+              <th className="border border-border/80 bg-muted px-3 py-2 text-left font-semibold" {...props}>{children}</th>
             ),
             td: ({ children, ...props }) => (
-              <td className="border border-border/60 px-3 py-1.5" {...props}>{children}</td>
+              <td className="border border-border/60 px-3 py-2 align-top" {...props}>{children}</td>
             ),
             pre: ({ children, ...props }) => (
-              <pre className="rounded bg-background/50 p-2 text-xs overflow-x-auto" {...props}>{children}</pre>
+              <pre className="overflow-x-auto rounded-lg border border-border/60 bg-muted/30 p-3 text-[13px] leading-6" {...props}>{children}</pre>
             ),
           }}
         >
@@ -635,6 +640,25 @@ function ThinkingBlock({ content }: { content: string }) {
  */
 function processContent(text: string): string {
   let result = text
+
+  // Readability mode: treat single line breaks as paragraph breaks.
+  // This helps long plain-text outputs avoid looking like one block.
+  result = result.replace(/(?<!\n)\n(?!\n)/g, "\n\n")
+
+  // If the response is mostly plain prose (not markdown structures),
+  // auto-split Chinese sentence boundaries into paragraphs so long
+  // answers remain scannable even when the model returns one block.
+  const hasStructuredMarkdown =
+    /(^|\n)\s*([-*+]|\d+\.)\s+/.test(result) || // lists
+    /```/.test(result) || // code fences
+    /\|.*\|/.test(result) || // tables
+    /(^|\n)\s*#{1,6}\s+/.test(result) // headings
+  if (!hasStructuredMarkdown) {
+    result = result
+      .replace(/([。！？])\s*(?=[^\n])/g, "$1\n\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  }
 
   // Wrap bare \begin{...}...\end{...} blocks with $$ for remark-math
   result = result.replace(
