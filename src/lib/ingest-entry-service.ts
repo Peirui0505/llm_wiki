@@ -2,7 +2,7 @@ import { open } from "@tauri-apps/plugin-dialog"
 import { fetchTranscript } from "youtube-transcript"
 import { copyFile, fileExists, listDirectory, preprocessFile, writeFile } from "@/commands/fs"
 import { enqueueIngest } from "@/lib/ingest-queue"
-import { getHttpFetch } from "@/lib/tauri-fetch"
+import { getHttpFetch, isFetchNetworkError } from "@/lib/tauri-fetch"
 import { getFileName, normalizePath } from "@/lib/path-utils"
 import { useWikiStore } from "@/stores/wiki-store"
 
@@ -157,7 +157,32 @@ async function fetchYouTubeTitle(url: string): Promise<string> {
 }
 
 async function saveYouTubeLink(projectId: string, projectPath: string, url: string, mode: IngestMode, warnings: string[]): Promise<void> {
-  const transcriptItems = await fetchTranscript(url)
+  const httpFetch = await getHttpFetch()
+  let transcriptItems: Array<{ text?: string; offset?: number; start?: number }> = []
+  try {
+    transcriptItems = await fetchTranscript(url, { fetch: httpFetch as any })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/captcha|too many requests/i.test(msg)) {
+      throw new Error(
+        "YouTube 暂时拦截了当前 IP（需要验证码），无法直接抓取字幕。请切换出口节点/网络后重试，或等待 10-30 分钟再试。若你能在浏览器看到字幕，也可以先导出字幕文本再作为普通文件导入。",
+      )
+    }
+    if (/transcript is disabled/i.test(msg)) {
+      throw new Error(
+        "该 YouTube 视频关闭了字幕功能（Transcript disabled），当前无法自动提取。可改为：1) 使用视频说明/评论区文本；2) 手动整理要点为笔记导入；3) 更换有字幕的镜像视频。",
+      )
+    }
+    if (/no transcripts are available/i.test(msg)) {
+      throw new Error(
+        "该 YouTube 视频没有可用字幕轨道（No transcripts available），无法自动提取。建议手动整理内容后以 .md/.txt 文件导入。",
+      )
+    }
+    if (isFetchNetworkError(err)) {
+      throw new Error("拉取 YouTube 字幕失败：网络连接被拒绝（WebView 报错 Load failed）。请确认可访问 youtube.com 与 *.googlevideo.com，并关闭会拦截应用流量的代理规则。")
+    }
+    throw err
+  }
   if (!Array.isArray(transcriptItems) || transcriptItems.length === 0) {
     throw new Error("未获取到 YouTube 字幕，可能该视频未提供字幕。")
   }

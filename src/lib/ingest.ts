@@ -217,7 +217,7 @@ export async function autoIngest(
   await streamChat(
     llmConfig,
     [
-      { role: "system", content: buildAnalysisPrompt(purpose, index, truncatedContent) },
+      { role: "system", content: buildAnalysisPrompt(schema, purpose, index, overview) },
       { role: "user", content: `Analyze this source document:\n\n**File:** ${fileName}${folderContext ? `\n**Folder context:** ${folderContext}` : ""}\n\n---\n\n${truncatedContent}` },
     ],
     {
@@ -239,6 +239,11 @@ export async function autoIngest(
     throw new Error(analysisActivity.detail || "Analysis stream failed")
   }
 
+  // Extract document type from stage-1 analysis.
+  const documentType = analysis.includes("DOCUMENT_TYPE: JOURNAL")
+    ? "JOURNAL"
+    : "OTHER"
+
   // ── Step 2: Generation ────────────────────────────────────────
   // LLM takes the analysis as context and produces wiki files + review items
   activity.updateItem(activityId, { detail: "Step 2/2: Generating wiki pages..." })
@@ -248,7 +253,7 @@ export async function autoIngest(
   await streamChat(
     llmConfig,
     [
-      { role: "system", content: buildGenerationPrompt(schema, purpose, index, fileName, overview, truncatedContent) },
+      { role: "system", content: buildGenerationPrompt(schema, analysis, documentType) },
       {
         role: "user",
         content: [
@@ -437,10 +442,14 @@ async function writeFileBlocks(
   const { blocks, warnings: parseWarnings } = parseFileBlocks(text)
   const warnings = [...parseWarnings]
   const writtenPaths: string[] = []
+  const dirMdCache = new Map<string, string[]>()
 
   const targetLang = useWikiStore.getState().outputLanguage
 
   for (const { path: relativePath, content } of blocks) {
+    let targetPath = relativePath
+    let targetContent = content
+
     // Language guard: reject individual FILE blocks whose body contradicts
     // the user-set target language. Skip:
     // - log.md (structural, short)
@@ -450,42 +459,86 @@ async function writeFileBlocks(
     //   detection. Keep the check for /concepts/ pages, which should be
     //   authoritative content in the target language.
     const isLog =
-      relativePath.endsWith("/log.md") || relativePath === "wiki/log.md"
+      targetPath.endsWith("/log.md") || targetPath === "wiki/log.md"
     const isEntityOrSource =
-      relativePath.startsWith("wiki/entities/") ||
-      relativePath.includes("/entities/") ||
-      relativePath.startsWith("wiki/sources/") ||
-      relativePath.includes("/sources/")
+      targetPath.startsWith("wiki/entities/") ||
+      targetPath.includes("/entities/") ||
+      targetPath.startsWith("wiki/sources/") ||
+      targetPath.includes("/sources/")
     if (
       targetLang &&
       targetLang !== "auto" &&
       !isLog &&
       !isEntityOrSource &&
-      !contentMatchesTargetLanguage(content, targetLang)
+      !contentMatchesTargetLanguage(targetContent, targetLang)
     ) {
-      const msg = `Dropped "${relativePath}" — body language doesn't match target ${targetLang}.`
+      const msg = `Dropped "${targetPath}" — body language doesn't match target ${targetLang}.`
       console.warn(`[ingest] ${msg}`)
       warnings.push(msg)
       continue
     }
 
-    const fullPath = `${projectPath}/${relativePath}`
+    const isEntityOrConceptPath =
+      (targetPath.startsWith("wiki/entities/") || targetPath.includes("/entities/") ||
+        targetPath.startsWith("wiki/concepts/") || targetPath.includes("/concepts/")) &&
+      targetPath.endsWith(".md")
+
+    // Dedupe entity/concept pages by normalized title/frontmatter key.
+    // This avoids creating near-duplicate pages such as:
+    // - "雅思考试" vs "雅思考试（IELTS）"
+    // - "我（作者）" vs "我（日记作者）"
+    if (isEntityOrConceptPath) {
+      const incomingKey = deriveDedupeKey(targetPath, targetContent)
+      const dir = targetPath.slice(0, targetPath.lastIndexOf("/"))
+      if (!dirMdCache.has(dir)) {
+        try {
+          const tree = await listDirectory(`${projectPath}/${dir}`)
+          dirMdCache.set(dir, flattenMdPaths(tree))
+        } catch {
+          dirMdCache.set(dir, [])
+        }
+      }
+      const existingInDir = (dirMdCache.get(dir) ?? []).filter((p) => !p.endsWith(`/${getFileName(targetPath)}`))
+      let matchedPath: string | null = null
+      for (const fullExisting of existingInDir) {
+        const relExisting = fullExisting.startsWith(`${projectPath}/`)
+          ? fullExisting.slice(projectPath.length + 1)
+          : fullExisting
+        const existingContent = await tryReadFile(fullExisting)
+        if (!existingContent) continue
+        const existingKey = deriveDedupeKey(relExisting, existingContent)
+        if (existingKey && incomingKey && existingKey === incomingKey) {
+          matchedPath = relExisting
+          break
+        }
+      }
+      if (matchedPath && matchedPath !== targetPath) {
+        const oldPath = targetPath
+        targetPath = matchedPath
+        targetContent = withDedupeMetadata(targetContent, incomingKey, "dedupe: update_existing_entity_or_concept")
+        warnings.push(`Dedupe matched "${oldPath}" -> "${matchedPath}" (key: ${incomingKey})`)
+      } else if (incomingKey) {
+        targetContent = withDedupeMetadata(targetContent, incomingKey, "dedupe: create_new_entity_or_concept")
+      }
+    }
+
+    const fullPath = `${projectPath}/${targetPath}`
     try {
-      if (relativePath === "wiki/log.md" || relativePath.endsWith("/log.md")) {
+      if (targetPath === "wiki/log.md" || targetPath.endsWith("/log.md")) {
         const existing = await tryReadFile(fullPath)
-        const appended = existing ? `${existing}\n\n${content.trim()}` : content.trim()
+        const appended = existing ? `${existing}\n\n${targetContent.trim()}` : targetContent.trim()
         await writeFile(fullPath, appended)
       } else if (
-        relativePath === "wiki/index.md" ||
-        relativePath.endsWith("/index.md") ||
-        relativePath === "wiki/overview.md" ||
-        relativePath.endsWith("/overview.md")
+        targetPath === "wiki/index.md" ||
+        targetPath.endsWith("/index.md") ||
+        targetPath === "wiki/overview.md" ||
+        targetPath.endsWith("/overview.md")
       ) {
         // Listing pages (index / overview) are always overwritten
         // wholesale — their sources field is incidental and merging
         // wouldn't make semantic sense (they aren't source-derived
         // content pages).
-        await writeFile(fullPath, content)
+        await writeFile(fullPath, targetContent)
       } else {
         // Content pages (entities / concepts / queries / synthesis /
         // comparisons / sources summaries): MERGE the sources field
@@ -500,12 +553,12 @@ async function writeFileBlocks(
         // (case-insensitive dedup, preserves existing order).
         const { mergeSourcesIntoContent } = await import("./sources-merge")
         const existing = await tryReadFile(fullPath)
-        const toWrite = mergeSourcesIntoContent(content, existing)
+        const toWrite = mergeSourcesIntoContent(targetContent, existing)
         await writeFile(fullPath, toWrite)
       }
-      writtenPaths.push(relativePath)
+      writtenPaths.push(targetPath)
     } catch (err) {
-      const msg = `Failed to write "${relativePath}": ${err instanceof Error ? err.message : String(err)}`
+      const msg = `Failed to write "${targetPath}": ${err instanceof Error ? err.message : String(err)}`
       console.error(`[ingest] ${msg}`)
       warnings.push(msg)
     }
@@ -583,172 +636,143 @@ function parseReviewBlocks(
  * Step 1 prompt: AI reads the source and produces a structured analysis.
  * This is the "discussion" step — the AI reasons about the source before writing wiki pages.
  */
-export function buildAnalysisPrompt(purpose: string, index: string, sourceContent: string = ""): string {
-  return [
-    "You are an expert research analyst. Read the source document and produce a structured analysis.",
-    "",
-    languageRule(sourceContent),
-    "",
-    "Your analysis should cover:",
-    "",
-    "## Key Entities",
-    "List people, organizations, products, datasets, tools mentioned. For each:",
-    "- Name and type",
-    "- Role in the source (central vs. peripheral)",
-    "- Whether it likely already exists in the wiki (check the index)",
-    "",
-    "## Key Concepts",
-    "List theories, methods, techniques, phenomena. For each:",
-    "- Name and brief definition",
-    "- Why it matters in this source",
-    "- Whether it likely already exists in the wiki",
-    "",
-    "## Main Arguments & Findings",
-    "- What are the core claims or results?",
-    "- What evidence supports them?",
-    "- How strong is the evidence?",
-    "",
-    "## Connections to Existing Wiki",
-    "- What existing pages does this source relate to?",
-    "- Does it strengthen, challenge, or extend existing knowledge?",
-    "",
-    "## Contradictions & Tensions",
-    "- Does anything in this source conflict with existing wiki content?",
-    "- Are there internal tensions or caveats?",
-    "",
-    "## Recommendations",
-    "- What wiki pages should be created or updated?",
-    "- What should be emphasized vs. de-emphasized?",
-    "- Any open questions worth flagging for the user?",
-    "",
-    "Be thorough but concise. Focus on what's genuinely important.",
-    "",
-    "If a folder context is provided, use it as a hint for categorization — the folder structure often reflects the user's organizational intent (e.g., 'papers/energy' suggests the file is an energy-related paper).",
-    "",
-    purpose ? `## Wiki Purpose (for context)\n${purpose}` : "",
-    index ? `## Current Wiki Index (for checking existing content)\n${index}` : "",
-  ].filter(Boolean).join("\n")
+export function buildAnalysisPrompt(
+  schema: string,
+  purpose: string,
+  index: string,
+  overview: string,
+): string {
+  return `
+You are a knowledge wiki assistant. Your job is to analyze a source document and plan what wiki pages to create or update.
+
+## Project Context
+
+### Purpose
+${purpose}
+
+### Schema & Rules
+${schema}
+
+### Current Index
+${index}
+
+### Current Overview
+${overview}
+
+## STEP 1: Document Type Classification (MUST DO FIRST)
+
+Classify the input document into one of these types:
+- JOURNAL: personal diary, daily review, 每日复盘, contains AMWAP/Worthy Memory/拟真日记
+- ARTICLE: blog post, news, essay, tutorial
+- BOOK: book notes, reading summary
+- CONVERSATION: chat log, Q&A, AI conversation worth saving
+- OTHER: anything else
+
+## STEP 2: Plan based on document type
+
+### If JOURNAL:
+- Output plan: create ONE file at personal-growth/journal/journal-YYYY-MM-DD.md
+- DO NOT plan any concept pages
+- DO NOT plan any entity pages
+- DO NOT extract people mentioned in diary as entities
+- DO NOT extract emotions or personal events as concepts
+
+### If ARTICLE / BOOK / OTHER:
+- Plan a source summary page at wiki/sources/
+- Check existing concepts and entities before planning new ones
+- For each potential concept/entity, check if a similar page already exists
+- If similar exists: plan to UPDATE existing page, not create new
+- Use dedupe_key rule: lowercase title, remove punctuation, spaces to hyphens
+- Only plan new concept/entity pages if genuinely new (different topic, not just different wording)
+
+## STEP 3: Dedupe Check
+
+Before finalizing your plan, list:
+- Concepts you considered but decided to MERGE into existing pages (and which page)
+- Entities you considered but decided to MERGE into existing pages (and which page)
+
+## Output Format
+
+Respond with a structured analysis:
+
+DOCUMENT_TYPE: [JOURNAL|ARTICLE|BOOK|CONVERSATION|OTHER]
+DOCUMENT_DATE: [YYYY-MM-DD if identifiable, else unknown]
+
+FILES_TO_CREATE:
+- [path]: [one line description]
+
+FILES_TO_UPDATE:
+- [path]: [what to add/change]
+
+DEDUPE_DECISIONS:
+- [concept/entity name] → merged into [existing page path]
+
+REASONING: [2-3 sentences explaining your decisions]
+`.trim()
 }
 
 /**
  * Step 2 prompt: AI takes its own analysis and generates wiki files + review items.
  */
-export function buildGenerationPrompt(schema: string, purpose: string, index: string, sourceFileName: string, overview?: string, sourceContent: string = ""): string {
-  // Use original filename (without extension) as the source summary page name
-  const sourceBaseName = sourceFileName.replace(/\.[^.]+$/, "")
+export function buildGenerationPrompt(
+  schema: string,
+  analysis: string,
+  documentType: string,
+): string {
+  return `
+You are a knowledge wiki assistant. Based on the analysis below, generate the exact file contents.
 
-  return [
-    "You are a wiki maintainer. Based on the analysis provided, generate wiki files.",
-    "",
-    languageRule(sourceContent),
-    "",
-    `## IMPORTANT: Source File`,
-    `The original source file is: **${sourceFileName}**`,
-    `All wiki pages generated from this source MUST include this filename in their frontmatter \`sources\` field.`,
-    "",
-    "## What to generate",
-    "",
-    `1. A source summary page at **wiki/sources/${sourceBaseName}.md** (MUST use this exact path)`,
-    "2. Entity pages in wiki/entities/ for key entities identified in the analysis",
-    "3. Concept pages in wiki/concepts/ for key concepts identified in the analysis",
-    "4. An updated wiki/index.md — add new entries to existing categories, preserve all existing entries",
-    "5. A log entry for wiki/log.md (just the new entry to append, format: ## [YYYY-MM-DD] ingest | Title)",
-    "6. An updated wiki/overview.md — a high-level summary of what the entire wiki covers, updated to reflect the newly ingested source. This should be a comprehensive 2-5 paragraph overview of ALL topics in the wiki, not just the new source.",
-    "",
-    "## Frontmatter Rules (CRITICAL)",
-    "",
-    "Every page MUST have YAML frontmatter with these fields:",
-    "```yaml",
-    "---",
-    "type: source | entity | concept | comparison | query | synthesis",
-    "title: Human-readable title",
-    "created: YYYY-MM-DD",
-    "updated: YYYY-MM-DD",
-    "tags: []",
-    "related: []",
-    `sources: [\"${sourceFileName}\"]  # MUST contain the original source filename`,
-    "---",
-    "```",
-    "",
-    `The \`sources\` field MUST always contain "${sourceFileName}" — this links the wiki page back to the original uploaded document.`,
-    "",
-    "Other rules:",
-    "- Use [[wikilink]] syntax for cross-references between pages",
-    "- Use kebab-case filenames",
-    "- Follow the analysis recommendations on what to emphasize",
-    "- If the analysis found connections to existing pages, add cross-references",
-    "",
-    "## Review block types",
-    "",
-    "After all FILE blocks, optionally emit REVIEW blocks for anything that needs human judgment:",
-    "",
-    "- contradiction: the analysis found conflicts with existing wiki content",
-    "- duplicate: an entity/concept might already exist under a different name in the index",
-    "- missing-page: an important concept is referenced but has no dedicated page",
-    "- suggestion: ideas for further research, related sources to look for, or connections worth exploring",
-    "",
-    "Only create reviews for things that genuinely need human input. Don't create trivial reviews.",
-    "",
-    "## OPTIONS allowed values (only these predefined labels):",
-    "",
-    "- contradiction: OPTIONS: Create Page | Skip",
-    "- duplicate: OPTIONS: Create Page | Skip",
-    "- missing-page: OPTIONS: Create Page | Skip",
-    "- suggestion: OPTIONS: Create Page | Skip",
-    "",
-    "The user also has a 'Deep Research' button (auto-added by the system) that triggers web search.",
-    "Do NOT invent custom option labels. Only use 'Create Page' and 'Skip'.",
-    "",
-    "For suggestion and missing-page reviews, the SEARCH field must contain 2-3 web search queries",
-    "(keyword-rich, specific, suitable for a search engine — NOT titles or sentences). Example:",
-    "  SEARCH: automated technical debt detection AI generated code | software quality metrics LLM code generation | static analysis tools agentic software development",
-    "",
-    purpose ? `## Wiki Purpose\n${purpose}` : "",
-    schema ? `## Wiki Schema\n${schema}` : "",
-    index ? `## Current Wiki Index (preserve all existing entries, add new ones)\n${index}` : "",
-    overview ? `## Current Overview (update this to reflect the new source)\n${overview}` : "",
-    "",
-    // ── OUTPUT FORMAT MUST BE THE LAST SECTION — models weight recent instructions highest ──
-    "## Output Format (MUST FOLLOW EXACTLY — this is how the parser reads your response)",
-    "",
-    "Your ENTIRE response consists of FILE blocks followed by optional REVIEW blocks. Nothing else.",
-    "",
-    "FILE block template:",
-    "```",
-    "---FILE: wiki/path/to/page.md---",
-    "(complete file content with YAML frontmatter)",
-    "---END FILE---",
-    "```",
-    "",
-    "REVIEW block template (optional, after all FILE blocks):",
-    "```",
-    "---REVIEW: type | Title---",
-    "Description of what needs the user's attention.",
-    "OPTIONS: Create Page | Skip",
-    "PAGES: wiki/page1.md, wiki/page2.md",
-    "SEARCH: query 1 | query 2 | query 3",
-    "---END REVIEW---",
-    "```",
-    "",
-    "## Output Requirements (STRICT — deviations will cause parse failure)",
-    "",
-    "1. The FIRST character of your response MUST be `-` (the opening of `---FILE:`).",
-    "2. DO NOT output any preamble such as \"Here are the files:\", \"Based on the analysis...\", or any introductory prose.",
-    "3. DO NOT echo or restate the analysis — that was stage 1's job. Your job is to emit FILE blocks.",
-    "4. DO NOT output markdown tables, bullet lists, or headings outside of FILE/REVIEW blocks.",
-    "5. DO NOT output any trailing commentary after the last `---END FILE---` or `---END REVIEW---`.",
-    "6. Between blocks, use only blank lines — no prose.",
-    "7. EVERY FILE block's content (titles, body, descriptions) MUST be in the mandatory output language specified below. No exceptions — not even for page names or section headings.",
-    "",
-    "If you start with anything other than `---FILE:`, the entire response will be discarded.",
-    "",
-    // Repeat the language directive at the very end so it wins the "most
-    // recent instruction" tie-breaker. Small-to-medium models otherwise
-    // drift back to their training-data language for individual pages.
-    "---",
-    "",
-    languageRule(sourceContent),
-  ].filter(Boolean).join("\n")
+## Schema Rules
+${schema}
+
+## Analysis Results
+${analysis}
+
+Detected Document Type: ${documentType}
+
+## Generation Rules
+
+### For JOURNAL documents:
+Generate ONE file only:
+- Path: personal-growth/journal/journal-YYYY-MM-DD.md
+- Structure:
+  Upper half: 📥 今日碎片 section (raw content preserved as-is)
+  Lower half: 📅 每日复盘 section (empty template, to be filled later)
+- Preserve the original diary content exactly, do not summarize or extract
+- DO NOT generate any concept or entity files
+
+### For all other documents:
+- Follow schema frontmatter format (type/created/updated/status/source_signal/dedupe_key/dedupe_note/aliases)
+- Every page must start with a bold one-line summary
+- Tags go inline after the summary: #tag1 #tag2
+- Sources and links go at the bottom of each page
+- Use first-person authentic voice, no corporate tone
+- Minimum 2 internal [[links]] per page
+
+### Dedupe enforcement:
+- If analysis says merge into existing page, output UPDATE instructions for that page only
+- Never create a new page if analysis decided to merge
+
+### Log entry:
+Always append to wiki/log.md:
+\`\`\`
+## [YYYY-MM-DD] ingest | [brief description]
+- 来源：[source]
+- 新增页面：[list or none]
+- 更新页面：[list or none]
+- 核心贡献：[one sentence]
+\`\`\`
+
+## Output Format
+
+Use this exact format for each file:
+
+---FILE: wiki/path/to/file.md---
+[file contents here]
+---END FILE---
+
+Generate all planned files now.
+`.trim()
 }
 
 function getStore() {
@@ -782,7 +806,9 @@ function getFrontmatterField(content: string, field: string): string {
 }
 
 function normalizeDedupeKey(raw: string): string {
-  return raw
+  const noParenthetical = raw.replace(/[（(][^()（）]{1,80}[)）]/g, " ").trim()
+  const base = noParenthetical || raw
+  return base
     .toLowerCase()
     .trim()
     .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")

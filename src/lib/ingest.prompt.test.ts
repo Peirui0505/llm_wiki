@@ -1,95 +1,55 @@
-import { describe, it, expect, beforeEach } from "vitest"
+import { describe, it, expect } from "vitest"
 import { buildAnalysisPrompt, buildGenerationPrompt } from "./ingest"
-import { useWikiStore } from "@/stores/wiki-store"
-
-beforeEach(() => {
-  useWikiStore.getState().setOutputLanguage("auto")
-})
 
 describe("buildAnalysisPrompt language directive", () => {
-  it("injects the user's explicit language setting", () => {
-    useWikiStore.getState().setOutputLanguage("Chinese")
-    const prompt = buildAnalysisPrompt("purpose", "index", "english source content")
-    expect(prompt).toContain("MANDATORY OUTPUT LANGUAGE: Chinese")
+  it("contains journal-first classification and planning rules", () => {
+    const prompt = buildAnalysisPrompt("schema", "purpose", "index", "overview")
+    expect(prompt).toContain("## STEP 1: Document Type Classification (MUST DO FIRST)")
+    expect(prompt).toContain("### If JOURNAL:")
+    expect(prompt).toContain("DO NOT plan any concept pages")
+    expect(prompt).toContain("DO NOT plan any entity pages")
+    expect(prompt).toContain("DOCUMENT_TYPE: [JOURNAL|ARTICLE|BOOK|CONVERSATION|OTHER]")
   })
 
-  it("uses user setting even when source is in a different language", () => {
-    useWikiStore.getState().setOutputLanguage("Japanese")
-    const prompt = buildAnalysisPrompt("", "", "这段内容是中文")
-    expect(prompt).toContain("MANDATORY OUTPUT LANGUAGE: Japanese")
-    expect(prompt).not.toContain("OUTPUT LANGUAGE: Chinese")
-  })
-
-  it("auto mode falls back to detecting source content language", () => {
-    useWikiStore.getState().setOutputLanguage("auto")
-    const prompt = buildAnalysisPrompt("", "", "これは日本語の文章です")
-    expect(prompt).toContain("MANDATORY OUTPUT LANGUAGE: Japanese")
-  })
-
-  it("auto mode with empty source defaults to English", () => {
-    useWikiStore.getState().setOutputLanguage("auto")
-    const prompt = buildAnalysisPrompt("", "", "")
-    expect(prompt).toContain("MANDATORY OUTPUT LANGUAGE: English")
-  })
-
-  it("contains structural analysis sections", () => {
-    const prompt = buildAnalysisPrompt("", "", "")
-    expect(prompt).toContain("## Key Entities")
-    expect(prompt).toContain("## Key Concepts")
-    expect(prompt).toContain("## Main Arguments & Findings")
-    expect(prompt).toContain("## Recommendations")
+  it("injects project context sections", () => {
+    const prompt = buildAnalysisPrompt("my-schema", "my-purpose", "my-index", "my-overview")
+    expect(prompt).toContain("### Purpose\nmy-purpose")
+    expect(prompt).toContain("### Schema & Rules\nmy-schema")
+    expect(prompt).toContain("### Current Index\nmy-index")
+    expect(prompt).toContain("### Current Overview\nmy-overview")
   })
 })
 
-describe("buildGenerationPrompt language directive", () => {
-  it("injects the user's explicit language setting", () => {
-    useWikiStore.getState().setOutputLanguage("Chinese")
-    const prompt = buildGenerationPrompt("schema", "purpose", "index", "source.pdf")
-    expect(prompt).toContain("MANDATORY OUTPUT LANGUAGE: Chinese")
+describe("buildGenerationPrompt structure", () => {
+  it("contains journal-only generation constraints", () => {
+    const prompt = buildGenerationPrompt("schema", "analysis", "JOURNAL")
+    expect(prompt).toContain("### For JOURNAL documents:")
+    expect(prompt).toContain("DO NOT generate any concept or entity files")
+    expect(prompt).toContain("personal-growth/journal/journal-YYYY-MM-DD.md")
   })
 
-  it("honors Vietnamese setting", () => {
-    useWikiStore.getState().setOutputLanguage("Vietnamese")
-    const prompt = buildGenerationPrompt("", "", "", "file.pdf")
-    expect(prompt).toContain("MANDATORY OUTPUT LANGUAGE: Vietnamese")
+  it("contains dedupe and log requirements", () => {
+    const prompt = buildGenerationPrompt("schema", "analysis", "ARTICLE")
+    expect(prompt).toContain("### Dedupe enforcement:")
+    expect(prompt).toContain("Always append to wiki/log.md:")
+    expect(prompt).toContain("## [YYYY-MM-DD] ingest | [brief description]")
   })
 
-  it("auto mode detects from source content", () => {
-    useWikiStore.getState().setOutputLanguage("auto")
-    const prompt = buildGenerationPrompt("", "", "", "file.pdf", undefined, "这是中文源文档内容")
-    expect(prompt).toContain("MANDATORY OUTPUT LANGUAGE: Chinese")
-  })
-
-  it("includes the source filename in output instructions", () => {
-    const prompt = buildGenerationPrompt("", "", "", "my-paper.pdf")
-    expect(prompt).toContain("my-paper.pdf")
-  })
-
-  it("respects user setting regardless of source content language", () => {
-    useWikiStore.getState().setOutputLanguage("English")
-    const prompt = buildGenerationPrompt("", "", "", "x.pdf", undefined, "私は日本語の文章を書きます")
-    expect(prompt).toContain("MANDATORY OUTPUT LANGUAGE: English")
-    expect(prompt).not.toContain("OUTPUT LANGUAGE: Japanese")
+  it("injects schema, analysis and document type", () => {
+    const prompt = buildGenerationPrompt("my-schema", "my-analysis", "BOOK")
+    expect(prompt).toContain("## Schema Rules\nmy-schema")
+    expect(prompt).toContain("## Analysis Results\nmy-analysis")
+    expect(prompt).toContain("Detected Document Type: BOOK")
   })
 })
 
 describe("analysis + generation prompt consistency", () => {
-  // Both stages MUST declare the same target language — otherwise the wiki
-  // files generated in stage 2 may disagree with the analysis from stage 1.
-  it("both stages declare the same language for a given setting", () => {
-    useWikiStore.getState().setOutputLanguage("Korean")
-    const analysis = buildAnalysisPrompt("", "", "")
-    const generation = buildGenerationPrompt("", "", "", "f.pdf")
-    expect(analysis).toContain("MANDATORY OUTPUT LANGUAGE: Korean")
-    expect(generation).toContain("MANDATORY OUTPUT LANGUAGE: Korean")
-  })
-
-  it("both stages in auto mode agree on detected language from source", () => {
-    useWikiStore.getState().setOutputLanguage("auto")
-    const korean = "이것은 한국어 문장입니다"
-    const analysis = buildAnalysisPrompt("", "", korean)
-    const generation = buildGenerationPrompt("", "", "", "f.pdf", undefined, korean)
-    expect(analysis).toContain("MANDATORY OUTPUT LANGUAGE: Korean")
-    expect(generation).toContain("MANDATORY OUTPUT LANGUAGE: Korean")
+  it("analysis outputs planning sections and generation enforces file-block output", () => {
+    const analysis = buildAnalysisPrompt("", "", "", "")
+    const generation = buildGenerationPrompt("", "", "OTHER")
+    expect(analysis).toContain("FILES_TO_CREATE:")
+    expect(analysis).toContain("DEDUPE_DECISIONS:")
+    expect(generation).toContain("---FILE: wiki/path/to/file.md---")
+    expect(generation).toContain("---END FILE---")
   })
 })

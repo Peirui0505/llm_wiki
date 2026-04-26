@@ -327,7 +327,8 @@ ${BASE_NAMING}
 - Goals: outcome as slug (e.g., \`run-a-marathon.md\`, \`learn-spanish.md\`)
 - Habits: behaviour name (e.g., \`daily-meditation.md\`, \`morning-pages.md\`)
 - Reflections: type + date (e.g., \`weekly-2024-03.md\`, \`quarterly-2024-q1.md\`)
-- Journal: date slug (e.g., \`2024-03-15.md\`)
+- Journal: event-date slug (e.g., \`2024-03-15.md\`, \`2023-11-02.md\` for backfilled entries)
+- Journal (fallback): \`journal-YYYY-MM-topic.md\` when exact day is unknown (e.g., \`journal-2022-08-college-transition.md\`)
 
 ## Frontmatter
 
@@ -352,6 +353,13 @@ Reflection pages also include:
 period: weekly | monthly | quarterly | annual
 \`\`\`
 
+Journal pages can optionally include:
+\`\`\`yaml
+entry_date: YYYY-MM-DD     # the date the event happened (can be in the past)
+captured_date: YYYY-MM-DD  # when you wrote/imported this entry
+entry_origin: daily | backfill | imported
+\`\`\`
+
 ## Index Format
 
 ${BASE_INDEX_FORMAT}
@@ -366,6 +374,7 @@ ${BASE_CROSSREF}
 - Reflection pages reference the goals and habits reviewed during that period
 - Goals link to the habits that support them via \`related:\`
 - Journal entries can reference goals and reflections inline with \`[[slug]]\`
+- When importing historical diaries, preserve original dates and link them to current goals/habits if relevant
 
 ## Contradiction Handling
 
@@ -378,6 +387,8 @@ ${BASE_CONTRADICTION}
 - Distinguish between outcome goals (what you want) and process goals (what you will do)
 - Reflect on *why* habits succeed or fail, not just whether they did
 - Use the synthesis directory for cross-cutting insights that span multiple goals or periods
+- Historical journals are first-class records: import old diaries into \`wiki/journal/\`, do not restrict journal to future entries only
+- For backfilled entries, prioritize the original event date in filename/frontmatter over import date
 `,
   purpose: `# Project Purpose — Personal Growth
 
