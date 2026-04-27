@@ -14,6 +14,7 @@ interface WikiPageInfo {
   type: string
   tags: string[]
   origin?: string
+  subgroup?: string
 }
 
 const TYPE_CONFIG: Record<string, { icon: typeof FileText; label: string; color: string; order: number }> = {
@@ -24,9 +25,17 @@ const TYPE_CONFIG: Record<string, { icon: typeof FileText; label: string; color:
   synthesis:   { icon: GitMerge,    label: "Synthesis",    color: "text-red-500",    order: 4 },
   comparison:  { icon: BarChart3,   label: "Comparisons",  color: "text-emerald-500",order: 5 },
   query:       { icon: HelpCircle,  label: "Queries",      color: "text-green-500",  order: 6 },
+  academic:    { icon: FileText,    label: "Academic",     color: "text-indigo-500", order: 7 },
+  business:    { icon: FileText,    label: "Business",     color: "text-sky-500",    order: 8 },
+  "personal-growth": { icon: FileText, label: "Personal Growth", color: "text-pink-500", order: 9 },
+  reading:     { icon: FileText,    label: "Reading",      color: "text-cyan-500",   order: 10 },
+  wealth:      { icon: FileText,    label: "Wealth",       color: "text-amber-500",  order: 11 },
 }
 
 const DEFAULT_CONFIG = { icon: FileText, label: "Other", color: "text-muted-foreground", order: 99 }
+const SUBGROUP_LABELS: Record<string, string> = {
+  journal: "Journal",
+}
 
 export function KnowledgeTree() {
   const project = useWikiStore((s) => s.project)
@@ -35,6 +44,7 @@ export function KnowledgeTree() {
   const fileTree = useWikiStore((s) => s.fileTree)
   const [pages, setPages] = useState<WikiPageInfo[]>([])
   const [expandedTypes, setExpandedTypes] = useState<Set<string>>(new Set(["overview", "entity", "concept", "source"]))
+  const [expandedSubgroups, setExpandedSubgroups] = useState<Set<string>>(new Set(["personal-growth:journal"]))
 
   const loadPages = useCallback(async () => {
     if (!project) return
@@ -104,6 +114,16 @@ export function KnowledgeTree() {
     })
   }
 
+  function toggleSubgroup(type: string, subgroup: string) {
+    const key = `${type}:${subgroup}`
+    setExpandedSubgroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
   return (
     <ScrollArea className="h-full">
       <div className="p-2">
@@ -121,6 +141,14 @@ export function KnowledgeTree() {
           const config = TYPE_CONFIG[type] ?? DEFAULT_CONFIG
           const Icon = config.icon
           const isExpanded = expandedTypes.has(type)
+          const subgroups = new Map<string, WikiPageInfo[]>()
+          for (const item of items) {
+            if (!item.subgroup) continue
+            const list = subgroups.get(item.subgroup) ?? []
+            list.push(item)
+            subgroups.set(item.subgroup, list)
+          }
+          const sortedSubgroups = [...subgroups.entries()].sort((a, b) => a[0].localeCompare(b[0]))
 
           return (
             <div key={type} className="mb-1">
@@ -140,7 +168,7 @@ export function KnowledgeTree() {
 
               {isExpanded && (
                 <div className="ml-3">
-                  {items.map((page) => {
+                  {items.filter((p) => !p.subgroup).map((page) => {
                     const isSelected = selectedFile === page.path
                     return (
                       <button
@@ -156,6 +184,48 @@ export function KnowledgeTree() {
                         {page.origin === "web-clip" && <Globe className="h-3 w-3 shrink-0 text-blue-400" />}
                         <span className="truncate">{page.title}</span>
                       </button>
+                    )
+                  })}
+
+                  {sortedSubgroups.map(([subgroup, subgroupItems]) => {
+                    const subgroupKey = `${type}:${subgroup}`
+                    const isSubExpanded = expandedSubgroups.has(subgroupKey)
+                    const subgroupLabel = SUBGROUP_LABELS[subgroup] ?? subgroup
+                    return (
+                      <div key={subgroupKey} className="mt-1">
+                        <button
+                          onClick={() => toggleSubgroup(type, subgroup)}
+                          className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-sm hover:bg-accent/50"
+                        >
+                          {isSubExpanded ? (
+                            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          ) : (
+                            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          )}
+                          <span className="flex-1 text-left text-[11px] font-medium uppercase tracking-wide text-muted-foreground/80">
+                            {subgroupLabel}
+                          </span>
+                          <span className="text-xs text-muted-foreground">{subgroupItems.length}</span>
+                        </button>
+                        {isSubExpanded && subgroupItems.map((page) => {
+                          const isSelected = selectedFile === page.path
+                          return (
+                            <button
+                              key={page.path}
+                              onClick={() => setSelectedFile(page.path)}
+                              className={`flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-sm ${
+                                isSelected
+                                  ? "bg-accent text-accent-foreground"
+                                  : "text-muted-foreground hover:bg-accent/50 hover:text-accent-foreground"
+                              }`}
+                              title={page.path}
+                            >
+                              {page.origin === "web-clip" && <Globe className="h-3 w-3 shrink-0 text-blue-400" />}
+                              <span className="truncate">{page.title}</span>
+                            </button>
+                          )
+                        })}
+                      </div>
                     )
                   })}
                 </div>
@@ -232,6 +302,7 @@ function parsePageInfo(path: string, fileName: string, content: string): WikiPag
   let title = fileName.replace(".md", "").replace(/-/g, " ")
   const tags: string[] = []
   let origin: string | undefined
+  let subgroup: string | undefined
 
   // Parse YAML frontmatter
   const fmMatch = content.match(/^---\n([\s\S]*?)\n---/)
@@ -266,10 +337,21 @@ function parsePageInfo(path: string, fileName: string, content: string): WikiPag
     else if (path.includes("/queries/")) type = "query"
     else if (path.includes("/comparisons/")) type = "comparison"
     else if (path.includes("/synthesis/")) type = "synthesis"
+    else if (path.includes("/academic/")) type = "academic"
+    else if (path.includes("/business/")) type = "business"
+    else if (path.includes("/personal-growth/")) type = "personal-growth"
+    else if (path.includes("/reading/")) type = "reading"
+    else if (path.includes("/wealth/")) type = "wealth"
     else if (fileName === "overview.md") type = "overview"
   }
 
-  return { path, title, type, tags, origin }
+  // Special grouping: keep journal pages under Personal Growth as a subgroup.
+  if (type === "journal" && path.includes("/personal-growth/journal/")) {
+    type = "personal-growth"
+    subgroup = "journal"
+  }
+
+  return { path, title, type, tags, origin, subgroup }
 }
 
 function flattenMdFiles(nodes: FileNode[]): FileNode[] {

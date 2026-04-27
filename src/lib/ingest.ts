@@ -184,13 +184,32 @@ export async function autoIngest(
     filesWritten: [],
   })
 
-  const [sourceContent, schema, purpose, index, overview] = await Promise.all([
+  const [
+    sourceContent, schema, purpose, index, overview,
+    academicIndex, businessIndex, wealthIndex,
+    readingIndex, makerIndex, personalGrowthIndex,
+  ] = await Promise.all([
     tryReadFile(sp),
     tryReadFile(`${pp}/schema.md`),
     tryReadFile(`${pp}/purpose.md`),
     tryReadFile(`${pp}/wiki/index.md`),
     tryReadFile(`${pp}/wiki/overview.md`),
+    tryReadFile(`${pp}/wiki/academic/index.md`),
+    tryReadFile(`${pp}/wiki/business/index.md`),
+    tryReadFile(`${pp}/wiki/wealth/index.md`),
+    tryReadFile(`${pp}/wiki/reading/index.md`),
+    tryReadFile(`${pp}/wiki/maker/index.md`),
+    tryReadFile(`${pp}/wiki/personal-growth/index.md`),
   ])
+
+  const domainIndexes = [
+    academicIndex && `### Academic Index\n${academicIndex}`,
+    businessIndex && `### Business Index\n${businessIndex}`,
+    wealthIndex && `### Wealth Index\n${wealthIndex}`,
+    readingIndex && `### Reading Index\n${readingIndex}`,
+    makerIndex && `### Maker Index\n${makerIndex}`,
+    personalGrowthIndex && `### Personal Growth Index\n${personalGrowthIndex}`,
+  ].filter(Boolean).join("\n\n")
 
   // ── Cache check: skip re-ingest if source content hasn't changed ──
   const cachedFiles = await checkIngestCache(pp, fileName, sourceContent)
@@ -217,7 +236,7 @@ export async function autoIngest(
   await streamChat(
     llmConfig,
     [
-      { role: "system", content: buildAnalysisPrompt(schema, purpose, index, overview) },
+      { role: "system", content: buildAnalysisPrompt(schema, purpose, index, overview, domainIndexes) },
       { role: "user", content: `Analyze this source document:\n\n**File:** ${fileName}${folderContext ? `\n**Folder context:** ${folderContext}` : ""}\n\n---\n\n${truncatedContent}` },
     ],
     {
@@ -240,9 +259,8 @@ export async function autoIngest(
   }
 
   // Extract document type from stage-1 analysis.
-  const documentType = analysis.includes("DOCUMENT_TYPE: JOURNAL")
-    ? "JOURNAL"
-    : "OTHER"
+  const typeMatch = analysis.match(/DOCUMENT_TYPE:\s*(JOURNAL|ARTICLE|BOOK|CONVERSATION|OTHER)/i)
+  const documentType = typeMatch ? typeMatch[1].toUpperCase() : "OTHER"
 
   // ── Step 2: Generation ────────────────────────────────────────
   // LLM takes the analysis as context and produces wiki files + review items
@@ -314,7 +332,9 @@ export async function autoIngest(
   const sourceBaseName = fileName.replace(/\.[^.]+$/, "")
   const sourceSummaryPath = `wiki/sources/${sourceBaseName}.md`
   const sourceSummaryFullPath = `${pp}/${sourceSummaryPath}`
-  const hasSourceSummary = writtenPaths.some((p) => p.startsWith("wiki/sources/"))
+  const hasSourceSummary =
+    documentType === "JOURNAL" ||
+    writtenPaths.some((p) => p.startsWith("wiki/sources/"))
 
   // If the signal was aborted (e.g. user switched projects / cancelled),
   // skip the fallback summary write — the LLM streams returned empty
@@ -641,6 +661,7 @@ export function buildAnalysisPrompt(
   purpose: string,
   index: string,
   overview: string,
+  domainIndexes: string,
 ): string {
   return `
 You are a knowledge wiki assistant. Your job is to analyze a source document and plan what wiki pages to create or update.
@@ -659,6 +680,9 @@ ${index}
 ### Current Overview
 ${overview}
 
+### Domain Indexes (子目录结构参考，摄入时按此归类)
+${domainIndexes}
+
 ## STEP 1: Document Type Classification (MUST DO FIRST)
 
 Classify the input document into one of these types:
@@ -671,7 +695,8 @@ Classify the input document into one of these types:
 ## STEP 2: Plan based on document type
 
 ### If JOURNAL:
-- Output plan: create ONE file at personal-growth/journal/journal-YYYY-MM-DD.md
+- Output plan: create ONE file using the journal path defined in Schema Section 0
+- File name format: journal-YYYY-MM-DD.md (use the date from the document, not today's date)
 - DO NOT plan any concept pages
 - DO NOT plan any entity pages
 - DO NOT extract people mentioned in diary as entities
@@ -734,7 +759,10 @@ Detected Document Type: ${documentType}
 
 ### For JOURNAL documents:
 Generate ONE file only:
-- Path: personal-growth/journal/journal-YYYY-MM-DD.md
+- Path: use the journal path from Schema Section 0 + journal-YYYY-MM-DD.md
+  (Schema Section 0 defines this as: wiki/personal-growth/journal/)
+  Full example: wiki/personal-growth/journal/journal-2026-04-26.md
+- Use the date found in the document content, NOT today's date
 - Structure:
   Upper half: 📥 今日碎片 section (raw content preserved as-is)
   Lower half: 📅 每日复盘 section (empty template, to be filled later)
@@ -869,8 +897,8 @@ export async function startIngest(
 
   const [sourceContent, schema, purpose, index] = await Promise.all([
     tryReadFile(sp),
-    tryReadFile(`${pp}/wiki/schema.md`),
-    tryReadFile(`${pp}/wiki/purpose.md`),
+    tryReadFile(`${pp}/schema.md`),
+    tryReadFile(`${pp}/purpose.md`),
     tryReadFile(`${pp}/wiki/index.md`),
   ])
 
@@ -937,7 +965,7 @@ export async function executeIngestWrites(
   const store = getStore()
 
   const [schema, index] = await Promise.all([
-    tryReadFile(`${pp}/wiki/schema.md`),
+    tryReadFile(`${pp}/schema.md`),
     tryReadFile(`${pp}/wiki/index.md`),
   ])
 
