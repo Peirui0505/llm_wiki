@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from "react"
-import ReactMarkdown from "react-markdown"
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkMath from "remark-math"
 import rehypeKatex from "rehype-katex"
@@ -94,6 +94,7 @@ export function ChatMessage({ message, isLastAssistant, onRegenerate }: ChatMess
           )}
         </div>
         {isAssistant && <CitedReferencesPanel content={message.content} savedReferences={message.references} />}
+        {isAssistant && <RetrievedPagesPanel pages={message.retrievedPages} />}
         {isAssistant && hovered && (
           <div className="flex items-center gap-1.5 px-1">
             <CopyButton content={message.content} />
@@ -277,6 +278,8 @@ function SaveToWikiButton({ content, visible }: { content: string; visible: bool
 interface CitedPage {
   title: string
   path: string
+  snippet?: string
+  score?: number
 }
 
 const REF_TYPE_CONFIG: Record<string, { icon: typeof FileText; color: string }> = {
@@ -313,11 +316,12 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
     return extractCitedPages(content)
   }, [content, savedReferences])
 
-  if (citedPages.length === 0) return null
+  const evidencePages = citedPages.filter((p) => Boolean(p.snippet && p.snippet.trim().length > 0))
+  if (evidencePages.length === 0) return null
 
   const MAX_COLLAPSED = 3
-  const visiblePages = expanded ? citedPages : citedPages.slice(0, MAX_COLLAPSED)
-  const hasMore = citedPages.length > MAX_COLLAPSED
+  const visiblePages = expanded ? evidencePages : evidencePages.slice(0, MAX_COLLAPSED)
+  const hasMore = evidencePages.length > MAX_COLLAPSED
 
   return (
     <div className="mb-1 rounded-lg border border-border/70 bg-muted/20 text-xs">
@@ -327,7 +331,7 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
         className="flex w-full items-center gap-1.5 px-3 py-2 text-muted-foreground transition-colors hover:text-foreground"
       >
         <FileText className="h-3 w-3 shrink-0" />
-        <span className="font-medium">References ({citedPages.length})</span>
+        <span className="font-medium">References ({evidencePages.length})</span>
         {hasMore && (
           expanded
             ? <ChevronDown className="h-3 w-3 ml-auto" />
@@ -367,15 +371,21 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
                     // try next
                   }
                 }
-                // Last resort: set the original path anyway
-                setSelectedFile(`${pp}/${page.path}`)
+                // If no candidate exists, do not select a broken path.
+                // References can be stale after page rename/delete.
+                window.alert(`Referenced page not found on disk:\n${page.path}`)
               }}
-              className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left transition-colors hover:bg-accent/50"
+              className="flex w-full flex-col items-start gap-1 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent/50"
               title={page.path}
             >
-              <span className="text-[10px] text-muted-foreground/60 w-4 shrink-0 text-right">[{i + 1}]</span>
-              <Icon className={`h-3 w-3 shrink-0 ${config.color}`} />
-              <span className="truncate text-foreground/80">{page.title}</span>
+              <div className="flex w-full items-center gap-1.5">
+                <span className="text-[10px] text-muted-foreground/60 w-4 shrink-0 text-right">[{i + 1}]</span>
+                <Icon className={`h-3 w-3 shrink-0 ${config.color}`} />
+                <span className="truncate text-foreground/85">{page.title}</span>
+              </div>
+              <p className="line-clamp-2 pl-5 text-[11px] leading-4 text-muted-foreground/90">
+                {page.snippet}
+              </p>
             </button>
           )
         })}
@@ -385,11 +395,46 @@ function CitedReferencesPanel({ content, savedReferences }: { content: string; s
             onClick={() => setExpanded(true)}
             className="w-full text-center text-[10px] text-muted-foreground hover:text-primary pt-0.5"
           >
-            +{citedPages.length - MAX_COLLAPSED} more...
+            +{evidencePages.length - MAX_COLLAPSED} more...
           </button>
         )}
       </div>
     </div>
+  )
+}
+
+function RetrievedPagesPanel({ pages }: { pages?: CitedPage[] }) {
+  if (!pages || pages.length === 0) return null
+  const MAX_COLLAPSED = 5
+  const visible = pages.slice(0, MAX_COLLAPSED)
+  const hiddenCount = pages.length - visible.length
+
+  return (
+    <details className="mt-1 rounded-lg border border-border/60 bg-muted/10 text-xs">
+      <summary className="cursor-pointer list-none px-3 py-2 text-muted-foreground hover:text-foreground">
+        全部召回页面 ({pages.length})
+      </summary>
+      <div className="px-3 pb-2">
+        {visible.map((page, i) => {
+          const refType = getRefType(page.path)
+          const config = REF_TYPE_CONFIG[refType] ?? REF_TYPE_CONFIG.source
+          const Icon = config.icon
+          return (
+            <div key={`${page.path}-${i}`} className="flex items-center gap-1.5 rounded-md px-2 py-1 text-foreground/75">
+              <span className="text-[10px] text-muted-foreground/60 w-4 shrink-0 text-right">[{i + 1}]</span>
+              <Icon className={`h-3 w-3 shrink-0 ${config.color}`} />
+              <span className="truncate">{page.title}</span>
+              {typeof page.score === "number" && (
+                <span className="ml-auto text-[10px] text-muted-foreground/70">score {page.score.toFixed(1)}</span>
+              )}
+            </div>
+          )
+        })}
+        {hiddenCount > 0 && (
+          <div className="px-2 pt-1 text-[10px] text-muted-foreground">+{hiddenCount} more...</div>
+        )}
+      </div>
+    </details>
   )
 }
 
@@ -505,25 +550,81 @@ function MarkdownContent({ content }: { content: string }) {
   return (
     <div>
       {thinking && <ThinkingBlock content={thinking} />}
-      <div className="chat-markdown prose prose-sm max-w-none dark:prose-invert prose-p:my-0 prose-p:leading-6 prose-headings:my-6 prose-headings:font-semibold prose-ul:my-5 prose-ol:my-5 prose-li:my-1.5 prose-blockquote:my-6 prose-blockquote:border-l-4 prose-blockquote:border-border prose-blockquote:pl-4 prose-pre:my-6 prose-code:text-[13px] prose-code:before:content-none prose-code:after:content-none">
+      <div className="chat-markdown prose prose-sm max-w-none dark:prose-invert prose-p:my-0 prose-p:leading-7 prose-headings:my-5 prose-headings:font-semibold prose-ul:my-4 prose-ol:my-4 prose-li:my-1.5 prose-blockquote:my-5 prose-blockquote:border-l-4 prose-blockquote:border-border prose-blockquote:pl-4 prose-pre:my-5 prose-code:text-[13px] prose-code:before:content-none prose-code:after:content-none">
         <ReactMarkdown
           remarkPlugins={[remarkGfm, remarkMath]}
           rehypePlugins={[rehypeKatex]}
+          urlTransform={(url) => {
+            if (url.startsWith("wikilink:") || url.startsWith("tag:")) return url
+            return defaultUrlTransform(url)
+          }}
           components={{
             p: ({ children, ...props }) => (
-              <p className="my-0 leading-6 [&+p]:mt-6" {...props}>
+              <p className="my-0 leading-7 tracking-[0.005em] [&+p]:mt-4" {...props}>
                 {children}
               </p>
+            ),
+            h1: ({ children, ...props }) => (
+              <h1 className="mt-7 mb-3 text-[1.45rem] font-semibold tracking-tight" {...props}>
+                {children}
+              </h1>
+            ),
+            h2: ({ children, ...props }) => (
+              <h2 className="mt-6 mb-2.5 text-[1.2rem] font-semibold tracking-tight" {...props}>
+                {children}
+              </h2>
+            ),
+            h3: ({ children, ...props }) => (
+              <h3 className="mt-5 mb-2 text-[1.05rem] font-semibold tracking-tight" {...props}>
+                {children}
+              </h3>
             ),
             a: ({ href, children }) => {
               if (href?.startsWith("wikilink:")) {
                 const pageName = href.slice("wikilink:".length)
                 return <WikiLink pageName={pageName}>{children}</WikiLink>
               }
+              if (href?.startsWith("tag:")) {
+                const tagName = href.slice("tag:".length)
+                return (
+                  <span
+                    className="mx-0.5 inline-flex items-center rounded-md border border-sky-500/30 bg-sky-500/10 px-1.5 py-[1px] text-[12px] font-medium text-sky-700 dark:border-sky-400/35 dark:bg-sky-400/15 dark:text-sky-300"
+                    title={`Tag: ${tagName}`}
+                  >
+                    #{children}
+                  </span>
+                )
+              }
               return (
-                <span className="text-primary underline cursor-default" title={href}>
+                <span className="break-all text-primary/90 underline decoration-primary/40 underline-offset-2 cursor-default hover:text-primary" title={href}>
                   {children}
                 </span>
+              )
+            },
+            blockquote: ({ children, ...props }) => (
+              <blockquote
+                className="rounded-r-md border-l-4 border-border bg-muted/20 py-1.5 pr-3 pl-3 italic text-foreground/90"
+                {...props}
+              >
+                {children}
+              </blockquote>
+            ),
+            code: ({ className, children, ...props }) => {
+              const isBlock = !!className?.includes("language-")
+              if (isBlock) {
+                return (
+                  <code className={className} {...props}>
+                    {children}
+                  </code>
+                )
+              }
+              return (
+                <code
+                  className="rounded bg-muted/70 px-1.5 py-0.5 font-mono text-[12.5px] tracking-[0.01em] text-foreground/95"
+                  {...props}
+                >
+                  {children}
+                </code>
               )
             },
             table: ({ children, ...props }) => (
@@ -541,7 +642,7 @@ function MarkdownContent({ content }: { content: string }) {
               <td className="border border-border/60 px-3 py-2 align-top" {...props}>{children}</td>
             ),
             pre: ({ children, ...props }) => (
-              <pre className="overflow-x-auto rounded-lg border border-border/60 bg-muted/30 p-3 text-[13px] leading-6" {...props}>{children}</pre>
+              <pre className="overflow-x-auto rounded-lg border border-border/60 bg-muted/35 p-3 font-mono text-[12.5px] leading-6 tracking-[0.01em]" {...props}>{children}</pre>
             ),
           }}
         >
@@ -641,9 +742,46 @@ function ThinkingBlock({ content }: { content: string }) {
 function processContent(text: string): string {
   let result = text
 
-  // Readability mode: treat single line breaks as paragraph breaks.
-  // This helps long plain-text outputs avoid looking like one block.
-  result = result.replace(/(?<!\n)\n(?!\n)/g, "\n\n")
+  // If the model wraps the whole answer in one fenced block (```markdown ... ```),
+  // unwrap it first so inner markdown can actually render.
+  const singleFence = result.match(/^\s*```(?:markdown|md|mdx|text|txt)?\s*\n([\s\S]*?)\n```\s*$/i)
+  if (singleFence) {
+    result = singleFence[1]
+  }
+
+  // Some models escape block-level markdown markers (e.g. "\##", "\-", "\```").
+  // Prefer a line-start unescape so headings/lists/code fences can render reliably
+  // without over-touching normal prose.
+  result = result
+    // headings: \## title
+    .replace(/(^|\n)([ \t]{0,3})\\(#{1,6}\s+)/g, "$1$2$3")
+    // unordered list: \- item / \* item / \+ item
+    .replace(/(^|\n)([ \t]{0,3})\\([-*+]\s+)/g, "$1$2$3")
+    // ordered list: \1. item
+    .replace(/(^|\n)([ \t]{0,3})\\(\d+\.\s+)/g, "$1$2$3")
+    // blockquote: \> quote
+    .replace(/(^|\n)([ \t]{0,3})\\(>\s?)/g, "$1$2$3")
+    // code fence: \```lang
+    .replace(/(^|\n)([ \t]{0,3})\\(```[^\n]*)/g, "$1$2$3")
+
+  // Fallback: if escaped markdown markers are heavily dominant, do a broader unescape.
+  const escapedMdCount = (result.match(/\\[#`*_\-\[\]]/g) ?? []).length
+  const plainMdSignals =
+    ((result.match(/(^|\n)\s{0,3}#{1,6}\s+/g) ?? []).length) +
+    ((result.match(/(^|\n)\s{0,3}[-*+]\s+/g) ?? []).length) +
+    ((result.match(/`[^`\n]+`/g) ?? []).length)
+  if (escapedMdCount >= 3 && plainMdSignals === 0) {
+    result = result.replace(/\\([#`*_\-\[\]])/g, "$1")
+  }
+
+  // Inline code often appears as \`text\`; normalize this pair safely.
+  result = result.replace(/\\`([^`\n]+)\\`/g, "`$1`")
+
+  // Convert hashtag tokens to clickable tag links (Obsidian-like), while
+  // preserving heading syntax like "# Title" (which has a space after #).
+  result = result.replace(/(^|[^\w`])#([\p{L}\p{N}_/-]{2,})(?=$|[^\p{L}\p{N}_/-])/gu, (_m, prefix: string, tag: string) => {
+    return `${prefix}[${tag}](tag:${tag})`
+  })
 
   // If the response is mostly plain prose (not markdown structures),
   // auto-split Chinese sentence boundaries into paragraphs so long

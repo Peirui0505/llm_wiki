@@ -1,9 +1,9 @@
 import { useRef, useEffect, useCallback, useState } from "react"
-import { BookOpen, Plus, Trash2, MessageSquare } from "lucide-react"
+import { BookOpen, Plus, Trash2, MessageSquare, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ChatMessage, StreamingMessage, useSourceFiles } from "./chat-message"
 import { ChatInput } from "./chat-input"
-import { useChatStore, chatMessagesToLLM } from "@/stores/chat-store"
+import { useChatStore, chatMessagesToLLM, type MessageReference } from "@/stores/chat-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { streamChat, type ChatMessage as LLMMessage } from "@/lib/llm-client"
 import { executeIngestWrites } from "@/lib/ingest"
@@ -11,11 +11,11 @@ import { listDirectory, readFile, deleteFile, createDirectory, writeFile as writ
 import { searchWiki } from "@/lib/search"
 import { buildRetrievalGraph, getRelatedNodes } from "@/lib/graph-relevance"
 import { normalizePath, getFileName, getRelativePath } from "@/lib/path-utils"
-import { getOutputLanguage, buildLanguageReminder } from "@/lib/output-language"
+import { getOutputLanguage, buildLanguageDirective, buildLanguageReminder } from "@/lib/output-language"
 import { isGreeting } from "@/lib/greeting-detector"
 
 // Store the page mapping from the last query so SourceFilesBar can show which pages were cited
-export let lastQueryPages: { title: string; path: string }[] = []
+export let lastQueryPages: MessageReference[] = []
 
 type ReviewCommand = "daily" | "weekly" | "monthly"
 
@@ -53,8 +53,14 @@ function clockLabel(date: Date): string {
   return `${hh}:${mm}`
 }
 
+function weekdayZh(date: Date): string {
+  const labels = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"]
+  return labels[date.getDay()]
+}
+
 function momentPagePath(projectPath: string, date: string): string {
-  return `${normalizePath(projectPath)}/wiki/personal-growth/journal/moments-${date}.md`
+  const localDate = new Date(`${date}T00:00:00`)
+  return `${normalizePath(projectPath)}/wiki/personal-growth/journal/📅${date}·${weekdayZh(localDate)}.md`
 }
 
 async function appendMomentEntry(projectPath: string, rawContent: string): Promise<string> {
@@ -64,7 +70,7 @@ async function appendMomentEntry(projectPath: string, rawContent: string): Promi
   const time = clockLabel(now)
   const header = [
     "---",
-    "type: note",
+    "type: journal",
     `title: "此时此刻 ${date}"`,
     `created: ${date}`,
     `updated: ${date}`,
@@ -253,6 +259,7 @@ export function ChatPanel() {
   const createConversation = useChatStore((s) => s.createConversation)
   const removeLastAssistantMessage = useChatStore((s) => s.removeLastAssistantMessage)
   const maxHistoryMessages = useChatStore((s) => s.maxHistoryMessages)
+  const [isWritingToWiki, setIsWritingToWiki] = useState(false)
 
   // Derive active messages via selector to re-render on message changes
   const allMessages = useChatStore((s) => s.messages)
@@ -387,7 +394,7 @@ export function ChatPanel() {
 
       // Build system prompt with wiki context using graph-enhanced retrieval
       const systemMessages: LLMMessage[] = []
-      let queryRefs: { title: string; path: string }[] = []
+      let queryRefs: MessageReference[] = []
       let langReminder: string | undefined
       // Pure greetings ("hi", "你好", "嗨") don't warrant running the whole
       // retrieval pipeline — it's slow, costs context, and drags in random
@@ -477,10 +484,23 @@ export function ChatPanel() {
 
         // ── Phase 3 & 4: Page budget control ───────────────────
         let usedChars = 0
-        type PageEntry = { title: string; path: string; content: string; priority: number }
+        type PageEntry = {
+          title: string
+          path: string
+          content: string
+          priority: number
+          snippet?: string
+          score?: number
+        }
         const relevantPages: PageEntry[] = []
 
-        const tryAddPage = async (title: string, filePath: string, priority: number): Promise<boolean> => {
+        const tryAddPage = async (
+          title: string,
+          filePath: string,
+          priority: number,
+          snippet?: string,
+          score?: number,
+        ): Promise<boolean> => {
           if (usedChars >= PAGE_BUDGET) return false
           try {
             const raw = await readFile(filePath)
@@ -490,22 +510,22 @@ export function ChatPanel() {
               : raw
             if (usedChars + truncated.length > PAGE_BUDGET) return false
             usedChars += truncated.length
-            relevantPages.push({ title, path: relativePath, content: truncated, priority })
+            relevantPages.push({ title, path: relativePath, content: truncated, priority, snippet, score })
             return true
           } catch { return false }
         }
 
         // P0: Title matches
         for (const r of topSearchResults.filter((r) => r.titleMatch)) {
-          await tryAddPage(r.title, r.path, 0)
+          await tryAddPage(r.title, r.path, 0, r.snippet, r.score)
         }
         // P1: Content matches
         for (const r of topSearchResults.filter((r) => !r.titleMatch)) {
-          await tryAddPage(r.title, r.path, 1)
+          await tryAddPage(r.title, r.path, 1, r.snippet, r.score)
         }
         // P2: Graph expansions
         for (const exp of graphExpansions) {
-          await tryAddPage(exp.title, exp.path, 2)
+          await tryAddPage(exp.title, exp.path, 2, undefined, exp.relevance)
         }
         // P3: Overview fallback
         if (relevantPages.length === 0) {
@@ -521,8 +541,6 @@ export function ChatPanel() {
         const pageList = relevantPages.map((p, i) =>
           `[${i + 1}] ${p.title} (${p.path})`
         ).join("\n")
-
-        const outLang = getOutputLanguage(text)
 
         systemMessages.push({
           role: "system",
@@ -546,13 +564,7 @@ export function ChatPanel() {
             "",
             "---",
             "",
-            `## ⚠️ MANDATORY OUTPUT LANGUAGE: ${outLang}`,
-            "",
-            `You MUST write your entire response in **${outLang}**.`,
-            `The wiki content above may be in a different language, but this is IRRELEVANT to your output language.`,
-            `Ignore the language of the wiki content. Write in ${outLang} only.`,
-            `Even proper nouns should use standard ${outLang} transliteration when appropriate.`,
-            `DO NOT use any other language. This overrides all other instructions.`,
+            buildLanguageDirective(text),
           ].filter(Boolean).join("\n"),
         })
 
@@ -560,7 +572,12 @@ export function ChatPanel() {
         // (after history so it's the last system instruction the LLM sees).
         langReminder = buildLanguageReminder(text)
 
-        lastQueryPages = relevantPages.map((p) => ({ title: p.title, path: p.path }))
+        lastQueryPages = relevantPages.map((p) => ({
+          title: p.title,
+          path: p.path,
+          snippet: p.snippet,
+          score: p.score,
+        }))
         queryRefs = [...lastQueryPages]
       }
 
@@ -651,8 +668,10 @@ export function ChatPanel() {
   }, [isStreaming, removeLastAssistantMessage, handleSend])
 
   const handleWriteToWiki = useCallback(async () => {
-    if (!project) return
+    if (!project || isWritingToWiki) return
     const pp = normalizePath(project.path)
+    setIsWritingToWiki(true)
+    addMessage("system", "正在根据当前 ingest 对话生成 FILE blocks 并写入 wiki，请稍候…")
     try {
       await executeIngestWrites(pp, llmConfig, undefined, undefined)
       try {
@@ -663,8 +682,11 @@ export function ChatPanel() {
       }
     } catch (err) {
       console.error("Failed to write to wiki:", err)
+      addMessage("system", `Write to Wiki 失败：${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setIsWritingToWiki(false)
     }
-  }, [project, llmConfig, setFileTree])
+  }, [project, llmConfig, setFileTree, addMessage, isWritingToWiki])
 
   const hasAssistantMessages = activeMessages.some((m) => m.role === "assistant")
   const showWriteButton = mode === "ingest" && !isStreaming && hasAssistantMessages
@@ -713,10 +735,11 @@ export function ChatPanel() {
                   variant="outline"
                   size="sm"
                   onClick={handleWriteToWiki}
+                  disabled={isWritingToWiki}
                   className="w-full gap-2"
                 >
-                  <BookOpen className="h-4 w-4" />
-                  Write to Wiki
+                  {isWritingToWiki ? <Loader2 className="h-4 w-4 animate-spin" /> : <BookOpen className="h-4 w-4" />}
+                  {isWritingToWiki ? "Writing..." : "Write to Wiki"}
                 </Button>
               </div>
             )}

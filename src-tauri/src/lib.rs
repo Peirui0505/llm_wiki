@@ -46,6 +46,8 @@ pub fn run() {
             commands::fs::find_related_wiki_pages,
             commands::fs::create_directory,
             commands::fs::file_exists,
+            commands::fs::file_modified_ms,
+            commands::fs::list_files_recursive,
             commands::project::create_project,
             commands::project::open_project,
             clip_server_status,

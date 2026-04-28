@@ -5,7 +5,10 @@ import { Plus, FileText, RefreshCw, BookOpen, Trash2, Folder, ChevronRight, Chev
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { useWikiStore } from "@/stores/wiki-store"
-import { copyFile, listDirectory, readFile, writeFile, deleteFile, findRelatedWikiPages, preprocessFile } from "@/commands/fs"
+import {
+  copyFile, listDirectory, listFilesRecursive, readFile, writeFile, deleteFile,
+  findRelatedWikiPages, preprocessFile, createDirectory, fileExists, fileModifiedMs,
+} from "@/commands/fs"
 import type { FileNode } from "@/types/wiki"
 import { startIngest } from "@/lib/ingest"
 import { enqueueIngest, enqueueBatch } from "@/lib/ingest-queue"
@@ -95,12 +98,27 @@ export function SourcesView() {
 
     setImporting(true)
     const pp = normalizePath(project.path)
+    const sourcesRoot = `${pp}/raw/sources`
     const paths = Array.isArray(selected) ? selected : [selected]
 
     const importedPaths: string[] = []
+    let importedJournalCount = 0
     for (const sourcePath of paths) {
       const originalName = getFileName(sourcePath) || "unknown"
-      const destPath = await getUniqueDestPath(`${pp}/raw/sources`, originalName)
+      if (isDiaryLikePath(sourcePath)) {
+        try {
+          await importDiaryDirectToJournal(pp, sourcePath)
+          importedJournalCount += 1
+        } catch (err) {
+          console.error(`Failed to import diary ${originalName}:`, err)
+        }
+        continue
+      }
+      const targetDir = isDiaryLikeName(originalName)
+        ? `${sourcesRoot}/diary`
+        : sourcesRoot
+      await createDirectory(targetDir).catch(() => {})
+      const destPath = await getUniqueDestPath(targetDir, originalName)
       try {
         await copyFile(sourcePath, destPath)
         importedPaths.push(destPath)
@@ -113,6 +131,9 @@ export function SourcesView() {
 
     setImporting(false)
     await loadSources()
+    if (importedJournalCount > 0) {
+      await refreshProjectTree(pp, setFileTree)
+    }
 
     // Enqueue for serial ingest (runs in background via ingest queue)
     if (llmConfig.apiKey || llmConfig.provider === "ollama" || llmConfig.provider === "custom") {
@@ -136,8 +157,29 @@ export function SourcesView() {
 
     setImporting(true)
     const pp = normalizePath(project.path)
+    const sourcesRoot = `${pp}/raw/sources`
     const folderName = getFileName(selected) || "imported"
-    const destDir = `${pp}/raw/sources/${folderName}`
+    const isDiaryFolder = isDiaryLikeName(folderName)
+    if (isDiaryFolder) {
+      try {
+        const allFiles = await listFilesRecursive(selected)
+        const diaryFiles = allFiles.filter((fp) => isDiaryImportableFile(fp))
+        for (const sourcePath of diaryFiles) {
+          await importDiaryDirectToJournal(pp, sourcePath)
+        }
+        setImporting(false)
+        await refreshProjectTree(pp, setFileTree)
+        await loadSources()
+      } catch (err) {
+        console.error(`Failed to import diary folder:`, err)
+        setImporting(false)
+      }
+      return
+    }
+
+    const targetRoot = sourcesRoot
+    await createDirectory(targetRoot).catch(() => {})
+    const destDir = `${targetRoot}/${folderName}`
 
     try {
       // Recursively copy the folder
@@ -456,6 +498,115 @@ async function getUniqueDestPath(dir: string, fileName: string): Promise<string>
 
   // Shouldn't happen, but fallback
   return `${dir}/${nameWithoutExt}-${date}-${Date.now()}${ext}`
+}
+
+function isDiaryLikeName(name: string): boolean {
+  const lower = name.toLowerCase()
+  if (/(^|[^a-z])(diary|journal)([^a-z]|$)/i.test(lower)) return true
+  if (/日记|复盘|amwap|worthy\s*memory/i.test(name)) return true
+  if (/^\d{4}[-_./年]\d{1,2}([-_./月]\d{1,2})?/.test(name)) return true
+  return false
+}
+
+function isDiaryLikePath(path: string): boolean {
+  const normalized = normalizePath(path).toLowerCase()
+  if (normalized.includes("/diary/") || normalized.includes("/journal/")) return true
+  return isDiaryLikeName(getFileName(path))
+}
+
+function isDiaryImportableFile(path: string): boolean {
+  const ext = getFileName(path).split(".").pop()?.toLowerCase() ?? ""
+  return ["md", "mdx", "txt"].includes(ext)
+}
+
+function parseDateFromText(text: string): string | null {
+  const m = text.match(/(\d{4})\s*[年\-./_]\s*(\d{1,2})\s*[月\-./_]\s*(\d{1,2})\s*日?/)
+  if (!m) return null
+  return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`
+}
+
+function parseDateFromName(fileName: string): string | null {
+  const stem = fileName.replace(/\.[^.]+$/, "")
+  return parseDateFromText(stem)
+}
+
+function formatLocalDate(d: Date): string {
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, "0")
+  const dd = String(d.getDate()).padStart(2, "0")
+  return `${yyyy}-${mm}-${dd}`
+}
+
+async function resolveDiaryDate(sourcePath: string): Promise<string> {
+  const fileName = getFileName(sourcePath)
+  const fromName = parseDateFromName(fileName)
+  if (fromName) return fromName
+  try {
+    const content = await readFile(sourcePath)
+    const fromContent = parseDateFromText(content.slice(0, 2000))
+    if (fromContent) return fromContent
+  } catch {
+    // fallback below
+  }
+  try {
+    const ms = await fileModifiedMs(sourcePath)
+    return formatLocalDate(new Date(ms))
+  } catch {
+    return formatLocalDate(new Date())
+  }
+}
+
+async function importDiaryDirectToJournal(projectPath: string, sourcePath: string): Promise<void> {
+  const pp = normalizePath(projectPath)
+  const sourceName = getFileName(sourcePath) || "diary"
+  const content = await readFile(sourcePath)
+  const entryDate = await resolveDiaryDate(sourcePath)
+  const today = formatLocalDate(new Date())
+  const journalDir = `${pp}/wiki/personal-growth/journal`
+  await createDirectory(journalDir).catch(() => {})
+  const targetPath = `${journalDir}/journal-${entryDate}.md`
+  const section = [
+    `## Imported Entry — ${sourceName}`,
+    "",
+    content.trim() || "(empty entry)",
+    "",
+  ].join("\n")
+
+  if (await fileExists(targetPath)) {
+    const existing = await readFile(targetPath).catch(() => "")
+    const merged = `${existing.trimEnd()}\n\n---\n\n${section}`
+    await writeFile(targetPath, merged)
+    return
+  }
+
+  const title = `Journal ${entryDate}`
+  const markdown = [
+    "---",
+    "type: journal",
+    `title: "${title}"`,
+    `created: ${today}`,
+    `updated: ${today}`,
+    "status: active",
+    "source_signal: direct_input",
+    "sources: []",
+    "tags: []",
+    "related: []",
+    `entry_date: ${entryDate}`,
+    `captured_date: ${today}`,
+    "entry_origin: imported",
+    "---",
+    "",
+    `# ${title}`,
+    "",
+    section,
+  ].join("\n")
+  await writeFile(targetPath, markdown)
+}
+
+async function refreshProjectTree(projectPath: string, setFileTree: (tree: FileNode[]) => void): Promise<void> {
+  const tree = await listDirectory(projectPath)
+  setFileTree(tree)
+  useWikiStore.getState().bumpDataVersion()
 }
 
 function filterTree(nodes: FileNode[]): FileNode[] {

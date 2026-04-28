@@ -50,6 +50,14 @@ export async function fileExists(path: string): Promise<boolean> {
   return invoke<boolean>("file_exists", { path })
 }
 
+export async function fileModifiedMs(path: string): Promise<number> {
+  return invoke<number>("file_modified_ms", { path })
+}
+
+export async function listFilesRecursive(path: string): Promise<string[]> {
+  return invoke<string[]>("list_files_recursive", { path })
+}
+
 export async function createProject(
   name: string,
   path: string,

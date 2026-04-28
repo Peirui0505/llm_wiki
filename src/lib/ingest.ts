@@ -344,7 +344,7 @@ export async function autoIngest(
   // task for retry rather than "success".
   if (!hasSourceSummary && !signal?.aborted) {
     const date = new Date().toISOString().slice(0, 10)
-    const fallbackContent = [
+    const fallbackContent = ensureSourceDedupeMetadata(sourceSummaryPath, [
       "---",
       `type: source`,
       `title: "Source: ${fileName}"`,
@@ -359,7 +359,7 @@ export async function autoIngest(
       "",
       analysis ? analysis.slice(0, 3000) : "(Analysis not available)",
       "",
-    ].join("\n")
+    ].join("\n"), "dedupe: create_fallback_source_summary")
     try {
       await writeFile(sourceSummaryFullPath, fallbackContent)
       writtenPaths.push(sourceSummaryPath)
@@ -541,6 +541,12 @@ async function writeFileBlocks(
         targetContent = withDedupeMetadata(targetContent, incomingKey, "dedupe: create_new_entity_or_concept")
       }
     }
+
+    targetContent = ensureSourceDedupeMetadata(
+      targetPath,
+      targetContent,
+      "dedupe: ensure_source_page_key",
+    )
 
     const fullPath = `${projectPath}/${targetPath}`
     try {
@@ -777,12 +783,26 @@ Generate ONE file only:
 - Use first-person authentic voice, no corporate tone
 - Minimum 2 internal [[links]] per page
 
+### When updating existing pages:
+- DO NOT append a dated "增量更新" block at the end
+- Integrate new insights into the existing structure naturally
+- Update the frontmatter \`updated\` date
+- Add a one-line note in the 来源 section about the new source
+- Exception: for JOURNAL pages, append new entries in chronological flow instead of rewriting prior diary records
+
+### For source pages:
+- Must include a "一句话主旨" section and a "快速摘要" section
+- "快速摘要" must be 200-500 Chinese characters, so readers can understand the core ideas without reading the original
+- In "关键论点与例子", keep concrete analogies and cases from the source; do not reduce them to abstract conclusions only
+- "我的应用" must explicitly connect to current priorities in now.md; avoid generic advice
+
 ### Dedupe enforcement:
 - If analysis says merge into existing page, output UPDATE instructions for that page only
 - Never create a new page if analysis decided to merge
 
 ### Log entry:
-Always append to wiki/log.md:
+For \`wiki/log.md\`, output APPEND-ONLY entries and NEVER rewrite old log content.
+The appended block MUST follow this exact template (no extra prose, no paragraph summary):
 \`\`\`
 ## [YYYY-MM-DD] ingest | [brief description]
 - 来源：[source]
@@ -790,6 +810,7 @@ Always append to wiki/log.md:
 - 更新页面：[list or none]
 - 核心贡献：[one sentence]
 \`\`\`
+Use exactly 1 heading line + exactly 4 bullet lines in this order.
 
 ## Output Format
 
@@ -870,6 +891,16 @@ function withDedupeMetadata(content: string, dedupeKey: string, dedupeNote: stri
   lines.push(`dedupe_key: "${dedupeKey}"`)
   lines.push(`dedupe_note: "${dedupeNote.replace(/"/g, '\\"')}"`)
   return `---\n${lines.join("\n")}\n---\n${body}`
+}
+
+function ensureSourceDedupeMetadata(relativePath: string, content: string, dedupeNote: string): string {
+  const isSourcePage =
+    relativePath.endsWith(".md") &&
+    (relativePath.startsWith("wiki/sources/") || relativePath.includes("/sources/"))
+  if (!isSourcePage) return content
+  const key = deriveDedupeKey(relativePath, content)
+  if (!key) return content
+  return withDedupeMetadata(content, key, dedupeNote)
 }
 
 function flattenMdPaths(nodes: Array<{ path: string; is_dir: boolean; children?: any[] }>): string[] {
@@ -1084,6 +1115,12 @@ export async function executeIngestWrites(
         dedupeRecords.push(`- ${incomingKey}: create -> ${relativePath}`)
       }
     }
+
+    content = ensureSourceDedupeMetadata(
+      relativePath,
+      content,
+      "dedupe: ensure_source_page_key",
+    )
 
     const fullPath = `${pp}/${relativePath}`
 

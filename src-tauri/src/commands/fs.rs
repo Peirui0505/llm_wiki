@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Read as IoRead;
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 use calamine::{Reader, open_workbook_auto, Data};
 
@@ -1140,6 +1141,54 @@ pub fn create_directory(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn file_exists(path: String) -> Result<bool, String> {
     run_guarded("file_exists", || Ok(Path::new(&path).exists()))
+}
+
+/// Return file modified timestamp in unix milliseconds.
+#[tauri::command]
+pub fn file_modified_ms(path: String) -> Result<u64, String> {
+    run_guarded("file_modified_ms", || {
+        let modified = fs::metadata(&path)
+            .map_err(|e| format!("Failed to stat file '{}': {}", path, e))?
+            .modified()
+            .map_err(|e| format!("Failed to read modified time '{}': {}", path, e))?;
+        let ms = modified
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("Invalid modified time '{}': {}", path, e))?
+            .as_millis() as u64;
+        Ok(ms)
+    })
+}
+
+/// Recursively list file paths under a directory.
+#[tauri::command]
+pub fn list_files_recursive(path: String) -> Result<Vec<String>, String> {
+    run_guarded("list_files_recursive", || {
+        let root = Path::new(&path);
+        if !root.is_dir() {
+            return Err(format!("'{}' is not a directory", path));
+        }
+        let mut out = Vec::new();
+        collect_files_recursive(root, &mut out)?;
+        Ok(out)
+    })
+}
+
+fn collect_files_recursive(dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    let entries = fs::read_dir(dir).map_err(|e| format!("Failed to read dir '{}': {}", dir.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Dir entry error: {}", e))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_files_recursive(&path, out)?;
+        } else {
+            out.push(path.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

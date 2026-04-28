@@ -33,8 +33,27 @@ describe("buildGenerationPrompt structure", () => {
   it("contains dedupe and log requirements", () => {
     const prompt = buildGenerationPrompt("schema", "analysis", "ARTICLE")
     expect(prompt).toContain("### Dedupe enforcement:")
-    expect(prompt).toContain("Always append to wiki/log.md:")
+    expect(prompt).toContain("For `wiki/log.md`, output APPEND-ONLY entries and NEVER rewrite old log content.")
     expect(prompt).toContain("## [YYYY-MM-DD] ingest | [brief description]")
+    expect(prompt).toContain("output APPEND-ONLY entries and NEVER rewrite old log content")
+    expect(prompt).toContain("exactly 1 heading line + exactly 4 bullet lines in this order")
+  })
+
+  it("contains source-page specific quality constraints", () => {
+    const prompt = buildGenerationPrompt("schema", "analysis", "ARTICLE")
+    expect(prompt).toContain('### For source pages:')
+    expect(prompt).toContain('"一句话主旨" section and a "快速摘要" section')
+    expect(prompt).toContain('"快速摘要" must be 200-500 Chinese characters')
+    expect(prompt).toContain('"我的应用" must explicitly connect to current priorities in now.md')
+  })
+
+  it("contains clean update rules with journal exception", () => {
+    const prompt = buildGenerationPrompt("schema", "analysis", "ARTICLE")
+    expect(prompt).toContain("### When updating existing pages:")
+    expect(prompt).toContain('DO NOT append a dated "增量更新" block at the end')
+    expect(prompt).toContain("Integrate new insights into the existing structure naturally")
+    expect(prompt).toContain("Update the frontmatter `updated` date")
+    expect(prompt).toContain("Exception: for JOURNAL pages, append new entries in chronological flow")
   })
 
   it("injects schema, analysis and document type", () => {

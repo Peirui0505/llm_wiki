@@ -11,6 +11,8 @@ export interface Conversation {
 export interface MessageReference {
   title: string
   path: string
+  snippet?: string
+  score?: number
 }
 
 export interface DisplayMessage {
@@ -19,7 +21,8 @@ export interface DisplayMessage {
   content: string
   timestamp: number
   conversationId: string
-  references?: MessageReference[]  // pages cited in this response, saved at creation time
+  references?: MessageReference[]  // pages actually cited in this response
+  retrievedPages?: MessageReference[] // full retrieved pages used to build context
 }
 
 interface ChatState {
@@ -44,7 +47,7 @@ interface ChatState {
   setConversations: (conversations: Conversation[]) => void
   setStreaming: (streaming: boolean) => void
   appendStreamToken: (token: string) => void
-  finalizeStream: (content: string, references?: MessageReference[]) => void
+  finalizeStream: (content: string, retrievedPages?: MessageReference[]) => void
   setMode: (mode: ChatState["mode"]) => void
   setIngestSource: (path: string | null) => void
   clearMessages: () => void
@@ -56,6 +59,28 @@ interface ChatState {
 }
 
 let messageCounter = 0
+const REFERENCE_MIN_SCORE = 3
+
+function hasEvidence(ref: MessageReference): boolean {
+  return Boolean(ref.snippet && ref.snippet.trim().length > 0)
+}
+
+function isQualifiedReference(ref: MessageReference): boolean {
+  if (!hasEvidence(ref)) return false
+  const score = ref.score ?? 0
+  return score >= REFERENCE_MIN_SCORE
+}
+
+function dedupeByPath(refs: MessageReference[]): MessageReference[] {
+  const seen = new Set<string>()
+  const out: MessageReference[] = []
+  for (const ref of refs) {
+    if (seen.has(ref.path)) continue
+    seen.add(ref.path)
+    out.push(ref)
+  }
+  return out
+}
 
 function nextId(): string {
   messageCounter += 1
@@ -162,7 +187,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       streamingContent: state.streamingContent + token,
     })),
 
-  finalizeStream: (content, references) =>
+  finalizeStream: (content, retrievedPages) =>
     set((state) => {
       const { activeConversationId, conversations } = state
       if (!activeConversationId) {
@@ -172,13 +197,40 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
 
+      const citedMatch = content.match(/<!--\s*cited:\s*([\d,\s]+)\s*-->/i)
+      const numberedPages = new Map<number, MessageReference>()
+      ;(retrievedPages ?? []).forEach((ref, idx) => {
+        numberedPages.set(idx + 1, ref)
+      })
+      const eligibleRetrieved = dedupeByPath((retrievedPages ?? []).filter(isQualifiedReference))
+
+      let references: MessageReference[] | undefined
+      if (citedMatch && numberedPages.size > 0) {
+        const citedNums = citedMatch[1]
+          .split(",")
+          .map((n) => parseInt(n.trim(), 10))
+          .filter((n) => Number.isFinite(n) && n > 0)
+        const citedRefs = citedNums
+          .map((n) => numberedPages.get(n))
+          .filter((ref): ref is MessageReference => Boolean(ref))
+        references = dedupeByPath(citedRefs.filter(isQualifiedReference))
+      } else {
+        references = eligibleRetrieved
+      }
+
+      const cleanContent = content
+        .replace(/\s*<!--\s*cited:\s*[\d,\s]+-->\s*/gi, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim()
+
       const newMessage: DisplayMessage = {
         id: nextId(),
         role: "assistant" as const,
-        content,
+        content: cleanContent,
         timestamp: Date.now(),
         conversationId: activeConversationId,
         references,
+        retrievedPages,
       }
 
       return {
