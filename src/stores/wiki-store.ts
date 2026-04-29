@@ -8,6 +8,7 @@ import type { WikiProject, FileNode } from "@/types/wiki"
  * `chat_completions` for backward compatibility with pre-0.3.7 configs.
  */
 export type CustomApiMode = "chat_completions" | "anthropic_messages"
+export type ReasoningEffort = "low" | "medium" | "high"
 
 interface LlmConfig {
   provider: "openai" | "anthropic" | "google" | "ollama" | "custom" | "minimax"
@@ -17,6 +18,8 @@ interface LlmConfig {
   customEndpoint: string
   maxContextSize: number // max context window in characters
   apiMode?: CustomApiMode
+  thinkingEnabled?: boolean
+  reasoningEffort?: ReasoningEffort
 }
 
 interface SearchApiConfig {
@@ -70,6 +73,8 @@ export interface ProviderOverride {
   baseUrl?: string           // customEndpoint for custom presets, ollamaUrl for ollama
   apiMode?: CustomApiMode
   maxContextSize?: number
+  thinkingEnabled?: boolean
+  reasoningEffort?: ReasoningEffort
 }
 
 export type ProviderConfigs = Record<string, ProviderOverride>

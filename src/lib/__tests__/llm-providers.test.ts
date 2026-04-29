@@ -302,4 +302,36 @@ describe("Sampling override translation across wires", () => {
     expect(body.stop).toBeUndefined()
     expect(body.max_tokens).toBe(8192)
   })
+
+  it("DeepSeek custom preset injects thinking when enabled", () => {
+    const cfg = getProviderConfig({
+      provider: "custom",
+      apiKey: "k",
+      model: "deepseek-v4-pro",
+      ollamaUrl: "",
+      customEndpoint: "https://api.deepseek.com/v1",
+      maxContextSize: 128000,
+      thinkingEnabled: true,
+      reasoningEffort: "high",
+    })
+    const body = cfg.buildBody(baseMessages) as Record<string, unknown>
+    expect(body.thinking).toEqual({ type: "enabled" })
+    expect(body.reasoning_effort).toBe("high")
+  })
+
+  it("DeepSeek custom preset omits thinking by default", () => {
+    const cfg = getProviderConfig({
+      provider: "custom",
+      apiKey: "k",
+      model: "deepseek-v4-flash",
+      ollamaUrl: "",
+      customEndpoint: "https://api.deepseek.com/v1",
+      maxContextSize: 128000,
+      thinkingEnabled: false,
+      reasoningEffort: "low",
+    })
+    const body = cfg.buildBody(baseMessages) as Record<string, unknown>
+    expect(body.thinking).toEqual({ type: "disabled" })
+    expect(body.reasoning_effort).toBeUndefined()
+  })
 })

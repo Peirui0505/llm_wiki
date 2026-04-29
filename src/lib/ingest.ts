@@ -161,6 +161,19 @@ export function languageRule(sourceContent: string = ""): string {
   return buildLanguageDirective(sourceContent)
 }
 
+function ingestSafeConfig(llmConfig: LlmConfig): LlmConfig {
+  // Ingest requires deterministic structured outputs (analysis + FILE blocks).
+  // DeepSeek thinking mode can become very slow and drift into tool-style prose,
+  // so force it off only for ingest pipelines.
+  if (llmConfig.provider === "custom" && /deepseek/i.test(llmConfig.model || llmConfig.customEndpoint || "")) {
+    return {
+      ...llmConfig,
+      thinkingEnabled: false,
+    }
+  }
+  return llmConfig
+}
+
 /**
  * Auto-ingest: reads source → LLM analyzes → LLM writes wiki pages, all in one go.
  * Used when importing new files.
@@ -172,6 +185,7 @@ export async function autoIngest(
   signal?: AbortSignal,
   folderContext?: string,
 ): Promise<string[]> {
+  const ingestConfig = ingestSafeConfig(llmConfig)
   const pp = normalizePath(projectPath)
   const sp = normalizePath(sourcePath)
   const activity = useActivityStore.getState()
@@ -185,7 +199,7 @@ export async function autoIngest(
   })
 
   const [
-    sourceContent, schema, purpose, index, overview,
+    sourceContent, schema, purpose, index, overview, now,
     academicIndex, businessIndex, wealthIndex,
     readingIndex, makerIndex, personalGrowthIndex,
   ] = await Promise.all([
@@ -194,6 +208,7 @@ export async function autoIngest(
     tryReadFile(`${pp}/purpose.md`),
     tryReadFile(`${pp}/wiki/index.md`),
     tryReadFile(`${pp}/wiki/overview.md`),
+    tryReadFile(`${pp}/wiki/now.md`),
     tryReadFile(`${pp}/wiki/academic/index.md`),
     tryReadFile(`${pp}/wiki/business/index.md`),
     tryReadFile(`${pp}/wiki/wealth/index.md`),
@@ -234,9 +249,9 @@ export async function autoIngest(
   let analysis = ""
 
   await streamChat(
-    llmConfig,
+    ingestConfig,
     [
-      { role: "system", content: buildAnalysisPrompt(schema, purpose, index, overview, domainIndexes) },
+      { role: "system", content: buildAnalysisPrompt(schema, purpose, index, overview, domainIndexes, now) },
       { role: "user", content: `Analyze this source document:\n\n**File:** ${fileName}${folderContext ? `\n**Folder context:** ${folderContext}` : ""}\n\n---\n\n${truncatedContent}` },
     ],
     {
@@ -259,7 +274,7 @@ export async function autoIngest(
   }
 
   // Extract document type from stage-1 analysis.
-  const typeMatch = analysis.match(/DOCUMENT_TYPE:\s*(JOURNAL|ARTICLE|BOOK|CONVERSATION|OTHER)/i)
+  const typeMatch = analysis.match(/DOCUMENT_TYPE:\s*(JOURNAL|ARTICLE|BOOK|CONVERSATION|COMPETITOR|OTHER)/i)
   const documentType = typeMatch ? typeMatch[1].toUpperCase() : "OTHER"
 
   // ── Step 2: Generation ────────────────────────────────────────
@@ -269,7 +284,7 @@ export async function autoIngest(
   let generation = ""
 
   await streamChat(
-    llmConfig,
+    ingestConfig,
     [
       { role: "system", content: buildGenerationPrompt(schema, analysis, documentType) },
       {
@@ -552,7 +567,8 @@ async function writeFileBlocks(
     try {
       if (targetPath === "wiki/log.md" || targetPath.endsWith("/log.md")) {
         const existing = await tryReadFile(fullPath)
-        const appended = existing ? `${existing}\n\n${targetContent.trim()}` : targetContent.trim()
+        const logBlock = normalizeLogEntryTemplate(targetContent)
+        const appended = existing ? `${existing}\n\n${logBlock}` : logBlock
         await writeFile(fullPath, appended)
       } else if (
         targetPath === "wiki/index.md" ||
@@ -668,17 +684,24 @@ export function buildAnalysisPrompt(
   index: string,
   overview: string,
   domainIndexes: string,
+  now: string,
 ): string {
   return `
 You are a knowledge wiki assistant. Your job is to analyze a source document and plan what wiki pages to create or update.
 
 ## Project Context
 
-### Purpose
+### Wiki Purpose
 ${purpose}
+
+### Current Focus (now.md)
+${now}
 
 ### Schema & Rules
 ${schema}
+
+### Domain Indexes (子目录结构参考，摄入时按此归类)
+${domainIndexes}
 
 ### Current Index
 ${index}
@@ -686,8 +709,7 @@ ${index}
 ### Current Overview
 ${overview}
 
-### Domain Indexes (子目录结构参考，摄入时按此归类)
-${domainIndexes}
+Note: now.md content is already provided above. Do not output tool-calling syntax (invoke/function_call/read_file JSON payloads).
 
 ## STEP 1: Document Type Classification (MUST DO FIRST)
 
@@ -696,6 +718,7 @@ Classify the input document into one of these types:
 - ARTICLE: blog post, news, essay, tutorial
 - BOOK: book notes, reading summary
 - CONVERSATION: chat log, Q&A, AI conversation worth saving
+- COMPETITOR: content from or about known competitors (科脉、思迅、乐檬、银豹、昂捷、客如云), including product launches, marketing articles, feature announcements, promotional content
 - OTHER: anything else
 
 ## STEP 2: Plan based on document type
@@ -716,6 +739,16 @@ Classify the input document into one of these types:
 - Use dedupe_key rule: lowercase title, remove punctuation, spaces to hyphens
 - Only plan new concept/entity pages if genuinely new (different topic, not just different wording)
 
+### If COMPETITOR:
+- Identify competitor name from: 科脉|思迅|乐檬|银豹|昂捷|客如云
+- Identify content type: 功能发布|内容营销|品牌动作|其他
+- Output plan: APPEND to wiki/business/competitors/[竞品名]/updates/YYYY-MM.md
+- If content contains reusable marketing techniques:
+  also plan to UPDATE wiki/business/competitors/_synthesis/宣传策略对比.md
+- DO NOT plan any concept pages
+- DO NOT plan any entity pages
+- DO NOT extract features as concepts
+
 ## STEP 3: Dedupe Check
 
 Before finalizing your plan, list:
@@ -726,7 +759,7 @@ Before finalizing your plan, list:
 
 Respond with a structured analysis:
 
-DOCUMENT_TYPE: [JOURNAL|ARTICLE|BOOK|CONVERSATION|OTHER]
+DOCUMENT_TYPE: [JOURNAL|ARTICLE|BOOK|CONVERSATION|COMPETITOR|OTHER]
 DOCUMENT_DATE: [YYYY-MM-DD if identifiable, else unknown]
 
 FILES_TO_CREATE:
@@ -774,6 +807,32 @@ Generate ONE file only:
   Lower half: 📅 每日复盘 section (empty template, to be filled later)
 - Preserve the original diary content exactly, do not summarize or extract
 - DO NOT generate any concept or entity files
+
+### For COMPETITOR documents:
+Append ONE entry to the competitor's monthly update file.
+Output path: wiki/business/competitors/[竞品名]/updates/YYYY-MM.md
+Format:
+\`\`\`
+## YYYY-MM-DD
+- 类型：[功能发布|内容营销|品牌动作|其他]
+- 标题：[原文标题]
+- 核心内容：[2-3句话，他们在说什么]
+- 宣传方式：[渠道+形式，如"公众号长文+短视频组合"]
+- 亮点提炼：[他们做得好的地方，1-2条]
+- 对标机会：[我们可以接话或借鉴的地方，没有就留空]
+- 原文来源：[URL或文件名]
+\`\`\`
+If the monthly update file doesn't exist yet, create it with:
+\`\`\`
+---
+type: competitor-update
+competitor: [竞品名]
+month: YYYY-MM
+created: YYYY-MM-DD
+updated: YYYY-MM-DD
+---
+# [竞品名] · YYYY年MM月动态
+\`\`\`
 
 ### For all other documents:
 - Follow schema frontmatter format (type/created/updated/status/source_signal/dedupe_key/dedupe_note/aliases)
@@ -903,6 +962,34 @@ function ensureSourceDedupeMetadata(relativePath: string, content: string, dedup
   return withDedupeMetadata(content, key, dedupeNote)
 }
 
+function normalizeLogEntryTemplate(content: string): string {
+  const normalized = content.trim()
+  const strictTemplate = /^## \[\d{4}-\d{2}-\d{2}\] ingest \| .+\n- 来源：.*\n- 新增页面：.*\n- 更新页面：.*\n- 核心贡献：.*$/m
+  if (strictTemplate.test(normalized)) return normalized
+
+  const dateMatch = normalized.match(/\[(\d{4}-\d{2}-\d{2})\]/)
+  const date = dateMatch?.[1] ?? new Date().toISOString().slice(0, 10)
+  const firstLine = normalized.split("\n").map((l) => l.trim()).find(Boolean) ?? "ingest update"
+  const brief = firstLine
+    .replace(/^#+\s*/, "")
+    .replace(/^[-*]\s*/, "")
+    .slice(0, 80)
+  const desc = brief || "ingest update"
+
+  const source = normalized.match(/(?:^|\n)-?\s*来源[:：]\s*(.+)$/m)?.[1]?.trim() ?? "unknown"
+  const created = normalized.match(/(?:^|\n)-?\s*新增页面[:：]\s*(.+)$/m)?.[1]?.trim() ?? "none"
+  const updated = normalized.match(/(?:^|\n)-?\s*更新页面[:：]\s*(.+)$/m)?.[1]?.trim() ?? "none"
+  const contribution = normalized.match(/(?:^|\n)-?\s*核心贡献[:：]\s*(.+)$/m)?.[1]?.trim() ?? desc
+
+  return [
+    `## [${date}] ingest | ${desc}`,
+    `- 来源：${source}`,
+    `- 新增页面：${created}`,
+    `- 更新页面：${updated}`,
+    `- 核心贡献：${contribution}`,
+  ].join("\n")
+}
+
 function flattenMdPaths(nodes: Array<{ path: string; is_dir: boolean; children?: any[] }>): string[] {
   const out: string[] = []
   for (const n of nodes) {
@@ -918,6 +1005,7 @@ export async function startIngest(
   llmConfig: LlmConfig,
   signal?: AbortSignal,
 ): Promise<void> {
+  const ingestConfig = ingestSafeConfig(llmConfig)
   const pp = normalizePath(projectPath)
   const sp = normalizePath(sourcePath)
   const store = getStore()
@@ -965,7 +1053,7 @@ export async function startIngest(
   let accumulated = ""
 
   await streamChat(
-    llmConfig,
+    ingestConfig,
     [
       { role: "system", content: systemPrompt },
       { role: "user", content: userMessage },
@@ -992,6 +1080,7 @@ export async function executeIngestWrites(
   userGuidance?: string,
   signal?: AbortSignal,
 ): Promise<string[]> {
+  const ingestConfig = ingestSafeConfig(llmConfig)
   const pp = normalizePath(projectPath)
   const store = getStore()
 
@@ -1051,7 +1140,7 @@ export async function executeIngestWrites(
     .join("\n\n")
 
   await streamChat(
-    llmConfig,
+    ingestConfig,
     [{ role: "system", content: systemPrompt }, ...conversationHistory],
     {
       onToken: (token) => {
@@ -1127,9 +1216,10 @@ export async function executeIngestWrites(
     try {
       if (relativePath === "wiki/log.md" || relativePath.endsWith("/log.md")) {
         const existing = await tryReadFile(fullPath)
+        const logBlock = normalizeLogEntryTemplate(content)
         const appended = existing
-          ? `${existing}\n\n${content.trim()}`
-          : content.trim()
+          ? `${existing}\n\n${logBlock}`
+          : logBlock
         await writeFile(fullPath, appended)
       } else {
         await writeFile(fullPath, content)

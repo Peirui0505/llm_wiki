@@ -116,6 +116,8 @@ function PresetRow({
   const apiMode = ov.apiMode ?? preset.apiMode ?? "chat_completions"
   const baseUrl = ov.baseUrl ?? preset.baseUrl ?? ""
   const context = ov.maxContextSize ?? preset.suggestedContextSize ?? 131072
+  const thinkingEnabled = ov.thinkingEnabled ?? false
+  const reasoningEffort = ov.reasoningEffort ?? "medium"
   const hasConfig = !!apiKey || !!ov.baseUrl || !!ov.model
   const needsApiKey = preset.provider !== "ollama"
 
@@ -265,6 +267,54 @@ function PresetRow({
               onChange={(v) => onChange({ model: v })}
             />
           </div>
+
+          {preset.id === "deepseek" && (
+            <div className="space-y-2">
+              <Label>Thinking 模式（DeepSeek）</Label>
+              <button
+                type="button"
+                onClick={() => onChange({ thinkingEnabled: !thinkingEnabled })}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full border transition-colors ${
+                  thinkingEnabled
+                    ? "border-primary bg-primary"
+                    : "border-muted-foreground/30 bg-muted-foreground/20"
+                }`}
+                aria-label={thinkingEnabled ? "Disable thinking mode" : "Enable thinking mode"}
+              >
+                <span
+                  className={`inline-block h-4 w-4 rounded-full bg-white shadow-sm ring-1 ring-black/10 transition-transform ${
+                    thinkingEnabled ? "translate-x-6" : "translate-x-0.5"
+                  }`}
+                />
+              </button>
+              <p className="text-xs text-muted-foreground">
+                默认关闭。开启后会在请求体中注入 DeepSeek 的 thinking 参数。
+              </p>
+
+              <div className="flex flex-wrap gap-2 pt-1">
+                {(["low", "medium", "high"] as const).map((effort) => {
+                  const active = reasoningEffort === effort
+                  return (
+                    <button
+                      key={effort}
+                      type="button"
+                      onClick={() => onChange({ reasoningEffort: effort })}
+                      className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                        active
+                          ? "border-primary bg-primary text-primary-foreground"
+                          : "border-border hover:bg-accent"
+                      }`}
+                    >
+                      {effort}
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Thinking 开启时生效；默认 medium。
+              </p>
+            </div>
+          )}
 
           <div className="space-y-2">
             <Label>Context window</Label>

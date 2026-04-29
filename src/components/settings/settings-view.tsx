@@ -63,6 +63,8 @@ function initialDraft(
     customEndpoint: llm.customEndpoint,
     maxContextSize: llm.maxContextSize ?? 204800,
     apiMode: llm.apiMode,
+    thinkingEnabled: llm.thinkingEnabled ?? false,
+    reasoningEffort: llm.reasoningEffort ?? "medium",
     embeddingEnabled: embed.enabled,
     embeddingEndpoint: embed.endpoint,
     embeddingApiKey: embed.apiKey,
@@ -141,6 +143,8 @@ export function SettingsView() {
       customEndpoint: draft.customEndpoint,
       maxContextSize: draft.maxContextSize,
       apiMode: draft.provider === "custom" ? draft.apiMode : undefined,
+      thinkingEnabled: draft.provider === "custom" ? draft.thinkingEnabled : undefined,
+      reasoningEffort: draft.provider === "custom" ? draft.reasoningEffort : undefined,
     }
     const newSearch = { provider: draft.searchProvider, apiKey: draft.searchApiKey }
     const newEmbed = {

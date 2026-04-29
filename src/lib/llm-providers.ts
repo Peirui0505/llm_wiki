@@ -31,6 +31,13 @@ interface ProviderConfig {
 
 const JSON_CONTENT_TYPE = "application/json"
 
+function isDeepSeekChatCompletions(config: LlmConfig): boolean {
+  if (config.provider !== "custom") return false
+  const endpoint = (config.customEndpoint ?? "").toLowerCase()
+  const model = (config.model ?? "").toLowerCase()
+  return endpoint.includes("api.deepseek.com") || model.includes("deepseek")
+}
+
 function parseOpenAiLine(line: string): string | null {
   if (!line.startsWith("data: ")) return null
   const data = line.slice(6).trim()
@@ -364,10 +371,21 @@ export function getProviderConfig(config: LlmConfig): ProviderConfig {
           "Content-Type": JSON_CONTENT_TYPE,
           ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
         },
-        buildBody: (messages, overrides) => ({
-          ...buildOpenAiBody(messages, overrides),
-          model,
-        }),
+        buildBody: (messages, overrides) => {
+          const body: Record<string, unknown> = {
+            ...buildOpenAiBody(messages, overrides),
+            model,
+          }
+          if (isDeepSeekChatCompletions(config)) {
+            if (config.thinkingEnabled) {
+              body.thinking = { type: "enabled" }
+              body.reasoning_effort = config.reasoningEffort ?? "medium"
+            } else {
+              body.thinking = { type: "disabled" }
+            }
+          }
+          return body
+        },
         parseStream: parseOpenAiLine,
       }
     }

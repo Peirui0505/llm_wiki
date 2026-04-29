@@ -14,7 +14,19 @@ export function resolveConfig(
 ): LlmConfig {
   const ov = override ?? {}
   const apiKey = ov.apiKey ?? ""
-  const model = ov.model ?? preset.defaultModel ?? ""
+  const rawModel = ov.model ?? preset.defaultModel ?? ""
+  const model =
+    preset.id === "deepseek"
+      ? rawModel === "deepseek-chat"
+        ? "deepseek-v4-flash"
+        : rawModel === "deepseek-reasoner"
+          ? "deepseek-v4-pro"
+          : rawModel === "deepseek-flash"
+            ? "deepseek-v4-flash"
+            : rawModel === "deepseek-pro"
+              ? "deepseek-v4-pro"
+          : rawModel
+      : rawModel
   const maxContextSize =
     ov.maxContextSize ?? preset.suggestedContextSize ?? fallback.maxContextSize
 
@@ -27,6 +39,8 @@ export function resolveConfig(
       customEndpoint: ov.baseUrl ?? preset.baseUrl ?? "",
       maxContextSize,
       apiMode: ov.apiMode ?? preset.apiMode ?? "chat_completions",
+      thinkingEnabled: ov.thinkingEnabled ?? false,
+      reasoningEffort: ov.reasoningEffort ?? "medium",
     }
   }
 

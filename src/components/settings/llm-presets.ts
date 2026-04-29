@@ -118,10 +118,9 @@ export const LLM_PRESETS: LlmPreset[] = [
     hint: "api.deepseek.com",
     provider: "custom",
     baseUrl: "https://api.deepseek.com/v1",
-    defaultModel: "deepseek-chat",
+    defaultModel: "deepseek-v4-flash",
     apiMode: "chat_completions",
-    // hermes models.py:243-246
-    suggestedModels: ["deepseek-chat", "deepseek-reasoner"],
+    suggestedModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
     suggestedContextSize: 64000,
   },
   {
