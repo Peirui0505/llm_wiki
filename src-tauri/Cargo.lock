@@ -4418,6 +4418,7 @@ version = "0.3.10"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "base64 0.22.1",
  "calamine",
  "chrono",
  "docx-rs",

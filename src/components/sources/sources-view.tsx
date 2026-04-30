@@ -633,6 +633,18 @@ function countFiles(nodes: FileNode[]): number {
   return count
 }
 
+function formatAddedTime(ms?: number): string {
+  if (!ms) return ""
+  const d = new Date(ms)
+  if (Number.isNaN(d.getTime())) return ""
+  const yyyy = d.getFullYear()
+  const mm = String(d.getMonth() + 1).padStart(2, "0")
+  const dd = String(d.getDate()).padStart(2, "0")
+  const hh = String(d.getHours()).padStart(2, "0")
+  const mi = String(d.getMinutes()).padStart(2, "0")
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`
+}
+
 function SourceTree({
   nodes,
   onOpen,
@@ -654,10 +666,16 @@ function SourceTree({
     setCollapsed((prev) => ({ ...prev, [path]: !prev[path] }))
   }
 
-  // Sort: folders first, then files, alphabetical within each group
+  // Sort: folders first, then files by added time desc (newest first),
+  // with name as tiebreaker.
   const sorted = [...nodes].sort((a, b) => {
     if (a.is_dir && !b.is_dir) return -1
     if (!a.is_dir && b.is_dir) return 1
+    if (!a.is_dir && !b.is_dir) {
+      const tA = a.added_ms ?? 0
+      const tB = b.added_ms ?? 0
+      if (tA !== tB) return tB - tA
+    }
     return a.name.localeCompare(b.name)
   })
 
@@ -707,9 +725,15 @@ function SourceTree({
             <button
               onClick={() => onOpen(node)}
               className="flex flex-1 items-center gap-2 truncate px-2 py-1 text-left"
+              title={node.added_ms ? `添加时间: ${formatAddedTime(node.added_ms)}` : undefined}
             >
               <FileText className="h-4 w-4 shrink-0" />
               <span className="truncate">{node.name}</span>
+              {node.added_ms && (
+                <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/70">
+                  {formatAddedTime(node.added_ms)}
+                </span>
+              )}
             </button>
             <Button
               variant="ghost"

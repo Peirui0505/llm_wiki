@@ -7,32 +7,16 @@ import { useChatStore, chatMessagesToLLM, type MessageReference } from "@/stores
 import { useWikiStore } from "@/stores/wiki-store"
 import { streamChat, type ChatMessage as LLMMessage } from "@/lib/llm-client"
 import { executeIngestWrites } from "@/lib/ingest"
-import { listDirectory, readFile, deleteFile, createDirectory, writeFile as writeFsFile } from "@/commands/fs"
+import { listDirectory, readFile, deleteFile, createDirectory, writeFile as writeFsFile, writeBase64File } from "@/commands/fs"
 import { searchWiki } from "@/lib/search"
 import { buildRetrievalGraph, getRelatedNodes } from "@/lib/graph-relevance"
 import { normalizePath, getFileName, getRelativePath } from "@/lib/path-utils"
 import { getOutputLanguage, buildLanguageDirective, buildLanguageReminder } from "@/lib/output-language"
 import { isGreeting } from "@/lib/greeting-detector"
+import { parseMomentCommand, parseReviewCommand, type ReviewCommand } from "./slash-commands"
 
 // Store the page mapping from the last query so SourceFilesBar can show which pages were cited
 export let lastQueryPages: MessageReference[] = []
-
-type ReviewCommand = "daily" | "weekly" | "monthly"
-
-function parseReviewCommand(text: string): ReviewCommand | null {
-  const normalized = text.trim()
-  if (normalized === "/每日复盘") return "daily"
-  if (normalized === "/每周复盘") return "weekly"
-  if (normalized === "/每月总结") return "monthly"
-  return null
-}
-
-function parseMomentCommand(text: string): string | null {
-  const trimmed = text.trim()
-  if (!trimmed.startsWith("/此时此刻")) return null
-  const payload = trimmed.slice("/此时此刻".length).trim()
-  return payload
-}
 
 function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10)
@@ -63,11 +47,45 @@ function momentPagePath(projectPath: string, date: string): string {
   return `${normalizePath(projectPath)}/wiki/personal-growth/journal/📅${date}·${weekdayZh(localDate)}.md`
 }
 
-async function appendMomentEntry(projectPath: string, rawContent: string): Promise<string> {
+function sanitizeImageName(name: string): string {
+  return name.replace(/[^\w.-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "")
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const out = typeof reader.result === "string" ? reader.result : ""
+      const base64 = out.includes(",") ? out.split(",")[1] : out
+      resolve(base64)
+    }
+    reader.onerror = () => reject(reader.error ?? new Error("Failed to read image"))
+    reader.readAsDataURL(file)
+  })
+}
+
+async function appendMomentEntry(projectPath: string, rawContent: string, images: File[] = []): Promise<string> {
   const date = todayIsoDate()
   const path = momentPagePath(projectPath, date)
   const now = new Date()
   const time = clockLabel(now)
+  const journalDir = `${normalizePath(projectPath)}/wiki/personal-growth/journal`
+  const assetsDir = `${journalDir}/assets`
+
+  const imageLines: string[] = []
+  if (images.length > 0) {
+    await createDirectory(assetsDir).catch(() => {})
+    for (let idx = 0; idx < images.length; idx += 1) {
+      const file = images[idx]
+      const safe = sanitizeImageName(file.name || `image-${idx + 1}.png`) || `image-${idx + 1}.png`
+      const fileName = `${date}-${time.replace(":", "")}-${idx + 1}-${safe}`
+      const targetPath = `${assetsDir}/${fileName}`
+      const base64 = await fileToBase64(file)
+      await writeBase64File(targetPath, base64)
+      imageLines.push(`![${safe}](assets/${fileName})`)
+    }
+  }
+
   const header = [
     "---",
     "type: journal",
@@ -87,7 +105,8 @@ async function appendMomentEntry(projectPath: string, rawContent: string): Promi
   const section = [
     `## ${time}`,
     "",
-    rawContent.trim(),
+    rawContent.trim() || "(图片记录)",
+    ...(imageLines.length > 0 ? ["", "### 图片", "", ...imageLines] : []),
     "",
   ].join("\n")
 
@@ -95,7 +114,7 @@ async function appendMomentEntry(projectPath: string, rawContent: string): Promi
     ? `${existing.trimEnd()}\n\n${section}`
     : `${header}${section}`
 
-  await createDirectory(`${normalizePath(projectPath)}/wiki/personal-growth/journal`).catch(() => {})
+  await createDirectory(journalDir).catch(() => {})
   await writeFsFile(path, next)
   return path
 }
@@ -284,25 +303,27 @@ export function ChatPanel() {
   }, [activeMessages, streamingContent])
 
   const handleSend = useCallback(
-    async (text: string) => {
+    async (text: string, images: File[] = []) => {
       // Auto-create a conversation if none is active
       let convId = useChatStore.getState().activeConversationId
       if (!convId) {
         convId = createConversation()
       }
 
-      addMessage("user", text)
+      if (text.trim()) {
+        addMessage("user", text)
+      }
       setStreaming(true)
 
       const momentPayload = parseMomentCommand(text)
       if (momentPayload !== null && project) {
         setStreaming(false)
-        if (!momentPayload) {
-          addMessage("system", "已识别 /此时此刻，但内容为空。请在命令后补充你此刻的记录。")
+        if (!momentPayload && images.length === 0) {
+          addMessage("system", "已识别 /此时此刻，但内容为空。请在命令后补充文字，或直接粘贴图片。")
           return
         }
         try {
-          const written = await appendMomentEntry(project.path, momentPayload)
+          const written = await appendMomentEntry(project.path, momentPayload, images)
           const tree = await listDirectory(normalizePath(project.path))
           setFileTree(tree)
           useWikiStore.getState().bumpDataVersion()
@@ -310,6 +331,11 @@ export function ChatPanel() {
         } catch (err) {
           addMessage("system", `此时此刻记录失败：${err instanceof Error ? err.message : String(err)}`)
         }
+        return
+      }
+      if (images.length > 0) {
+        setStreaming(false)
+        addMessage("system", "目前仅 `/此时此刻` 支持图片写入。请在命令后发送图片。")
         return
       }
 

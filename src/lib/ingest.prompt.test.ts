@@ -40,6 +40,9 @@ describe("buildGenerationPrompt structure", () => {
     expect(prompt).toContain("wiki/business/competitors/[竞品名]/updates/YYYY-MM.md")
     expect(prompt).toContain("type: competitor-update")
     expect(prompt).toContain("# [竞品名] · YYYY年MM月动态")
+    expect(prompt).toContain("### When appending to competitor updates:")
+    expect(prompt).toContain("⚠️ [竞品名]/profile.md 尚未创建，请人工初始化")
+    expect(prompt).toContain("> [!WARNING] 定位可能变化")
   })
 
   it("contains dedupe and log requirements", () => {

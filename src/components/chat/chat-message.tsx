@@ -93,6 +93,11 @@ export function ChatMessage({ message, isLastAssistant, onRegenerate }: ChatMess
             <MarkdownContent content={message.content} />
           )}
         </div>
+        {isUser && (
+          <div className="flex items-center justify-end px-1">
+            <CopyButton content={message.content} />
+          </div>
+        )}
         {isAssistant && <CitedReferencesPanel content={message.content} savedReferences={message.references} />}
         {isAssistant && <RetrievedPagesPanel pages={message.retrievedPages} />}
         {isAssistant && hovered && (

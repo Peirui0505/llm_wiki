@@ -1,4 +1,4 @@
-import { readFile, writeFile, listDirectory } from "@/commands/fs"
+import { readFile, writeFile, listDirectory, fileExists } from "@/commands/fs"
 import { streamChat } from "@/lib/llm-client"
 import type { LlmConfig } from "@/stores/wiki-store"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -834,6 +834,20 @@ updated: YYYY-MM-DD
 # [竞品名] · YYYY年MM月动态
 \`\`\`
 
+### When appending to competitor updates:
+After writing the update entry, check the competitor's profile.md:
+- If profile.md doesn't exist -> flag it by appending to wiki/log.md:
+  "⚠️ [竞品名]/profile.md 尚未创建，请人工初始化"
+- If profile.md exists -> check whether this update reveals new information about their positioning or focus:
+  - New major feature direction ->
+    append a note to profile.md 的 "追踪重点" 区块
+  - Significant strategy shift ->
+    append this [!WARNING] block to profile.md:
+    "> [!WARNING] 定位可能变化
+    > 基于YYYY-MM-DD的内容，他们似乎在向XX方向转移
+    > 建议人工确认是否更新核心定位"
+  - Minor content -> do not update profile.md
+
 ### For all other documents:
 - Follow schema frontmatter format (type/created/updated/status/source_signal/dedupe_key/dedupe_note/aliases)
 - Every page must start with a bold one-line summary
@@ -970,16 +984,29 @@ function normalizeLogEntryTemplate(content: string): string {
   const dateMatch = normalized.match(/\[(\d{4}-\d{2}-\d{2})\]/)
   const date = dateMatch?.[1] ?? new Date().toISOString().slice(0, 10)
   const firstLine = normalized.split("\n").map((l) => l.trim()).find(Boolean) ?? "ingest update"
-  const brief = firstLine
+
+  // Prefer extracting the title fragment after "ingest | ...", because
+  // fallback outputs like "[2026-04-30] ingest | 2026-04-30" otherwise
+  // degrade into a meaningless date-only description.
+  const titleMatch = firstLine.match(/(?:^#+\s*)?\[\d{4}-\d{2}-\d{2}\]\s*ingest\s*\|\s*(.+)$/i)
+  const brief = (titleMatch?.[1] ?? firstLine)
     .replace(/^#+\s*/, "")
-    .replace(/^[-*]\s*/, "")
+    .replace(/^[\-\*•·]\s*/, "")
     .slice(0, 80)
   const desc = brief || "ingest update"
 
-  const source = normalized.match(/(?:^|\n)-?\s*来源[:：]\s*(.+)$/m)?.[1]?.trim() ?? "unknown"
-  const created = normalized.match(/(?:^|\n)-?\s*新增页面[:：]\s*(.+)$/m)?.[1]?.trim() ?? "none"
-  const updated = normalized.match(/(?:^|\n)-?\s*更新页面[:：]\s*(.+)$/m)?.[1]?.trim() ?? "none"
-  const contribution = normalized.match(/(?:^|\n)-?\s*核心贡献[:：]\s*(.+)$/m)?.[1]?.trim() ?? desc
+  const extractField = (label: string): string | null => {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    const match = normalized.match(
+      new RegExp(`(?:^|\\n)\\s*(?:[\\-\\*•·]\\s*)?${escaped}\\s*[:：]\\s*(.+)$`, "m"),
+    )
+    return match?.[1]?.trim() || null
+  }
+
+  const source = extractField("来源") ?? "unknown"
+  const created = extractField("新增页面") ?? "none"
+  const updated = extractField("更新页面") ?? "none"
+  const contribution = extractField("核心贡献") ?? desc
 
   return [
     `## [${date}] ingest | ${desc}`,
@@ -1139,6 +1166,7 @@ export async function executeIngestWrites(
     .filter(Boolean)
     .join("\n\n")
 
+  let streamErrored = false
   await streamChat(
     ingestConfig,
     [{ role: "system", content: systemPrompt }, ...conversationHistory],
@@ -1147,20 +1175,23 @@ export async function executeIngestWrites(
         accumulated += token
         getStore().appendStreamToken(token)
       },
-      onDone: () => {
-        getStore().finalizeStream(accumulated)
-      },
+      onDone: () => {},
       onError: (err) => {
+        streamErrored = true
         getStore().finalizeStream(`Error generating wiki files: ${err.message}`)
       },
     },
     signal,
   )
+  if (streamErrored) return []
 
   const writtenPaths: string[] = []
   const dedupeRecords: string[] = []
   const dirMdCache = new Map<string, string[]>()
   const matches = accumulated.matchAll(FILE_BLOCK_REGEX)
+  const nonLogCreated: string[] = []
+  const nonLogUpdated: string[] = []
+  let pendingLogBlock: string | null = null
 
   for (const match of matches) {
     let relativePath = match[1].trim()
@@ -1212,23 +1243,73 @@ export async function executeIngestWrites(
     )
 
     const fullPath = `${pp}/${relativePath}`
+    const isLogFile = relativePath === "wiki/log.md" || relativePath.endsWith("/log.md")
 
     try {
-      if (relativePath === "wiki/log.md" || relativePath.endsWith("/log.md")) {
-        const existing = await tryReadFile(fullPath)
-        const logBlock = normalizeLogEntryTemplate(content)
-        const appended = existing
-          ? `${existing}\n\n${logBlock}`
-          : logBlock
-        await writeFile(fullPath, appended)
-      } else {
-        await writeFile(fullPath, content)
+      if (isLogFile) {
+        pendingLogBlock = content
+        continue
       }
+
+      const existedBefore =
+        await fileExists(fullPath).catch(() => false)
+      await writeFile(fullPath, content)
+      if (existedBefore) nonLogUpdated.push(relativePath)
+      else nonLogCreated.push(relativePath)
       writtenPaths.push(fullPath)
     } catch (err) {
       console.error(`Failed to write ${fullPath}:`, err)
     }
   }
+
+  // Do not rely solely on the LLM to summarize log metadata. We already
+  // know source path + what was actually created/updated, so generate a
+  // deterministic log entry and only borrow "核心贡献" text from LLM when useful.
+  const today = new Date().toISOString().slice(0, 10)
+  const ingestSource = store.ingestSource ? getFileName(store.ingestSource) : "conversation"
+  const createdLabel = nonLogCreated.length > 0 ? nonLogCreated.join(", ") : "none"
+  const updatedLabel = nonLogUpdated.length > 0 ? nonLogUpdated.join(", ") : "none"
+  const primaryTarget = [...nonLogCreated, ...nonLogUpdated][0]
+  const fallbackContribution = primaryTarget
+    ? `已写入 ${getFileName(primaryTarget).replace(/\.md$/i, "")} 等页面`
+    : "根据当前 ingest 对话写入 wiki"
+
+  const llmNormalizedLog = pendingLogBlock ? normalizeLogEntryTemplate(pendingLogBlock) : ""
+  const llmContribution = llmNormalizedLog.match(/(?:^|\n)- 核心贡献：(.+)$/m)?.[1]?.trim() ?? ""
+  const contribution = (
+    llmContribution &&
+    llmContribution !== "unknown" &&
+    llmContribution !== "none" &&
+    llmContribution !== today
+  )
+    ? llmContribution
+    : fallbackContribution
+
+  const deterministicLog = [
+    `## [${today}] ingest | ${today}`,
+    `- 来源：${ingestSource}`,
+    `- 新增页面：${createdLabel}`,
+    `- 更新页面：${updatedLabel}`,
+    `- 核心贡献：${contribution}`,
+  ].join("\n")
+
+  try {
+    const logPath = `${pp}/wiki/log.md`
+    const existingLog = await tryReadFile(logPath)
+    const appendedLog = existingLog
+      ? `${existingLog.trimEnd()}\n\n${deterministicLog}`
+      : deterministicLog
+    await writeFile(logPath, appendedLog)
+    writtenPaths.push(logPath)
+  } catch (err) {
+    console.error("Failed to write wiki/log.md:", err)
+  }
+
+  const displayContent = accumulated.replace(
+    /---FILE:\s*wiki\/log\.md\s*---\n[\s\S]*?---END FILE---/gi,
+    `---FILE: wiki/log.md---\n${deterministicLog}\n---END FILE---`,
+  )
+  getStore().finalizeStream(displayContent)
 
   if (writtenPaths.length > 0) {
     const fileList = writtenPaths.map((p) => `- ${p}`).join("\n")

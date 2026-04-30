@@ -3,6 +3,7 @@ use std::io::Read as IoRead;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
+use base64::Engine;
 use calamine::{Reader, open_workbook_auto, Data};
 
 use crate::panic_guard::run_guarded;
@@ -833,6 +834,22 @@ pub fn write_file(path: String, contents: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn write_base64_file(path: String, base64_contents: String) -> Result<(), String> {
+    run_guarded("write_base64_file", || {
+        let p = Path::new(&path);
+        if let Some(parent) = p.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent dirs for '{}': {}", path, e))?;
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(base64_contents)
+            .map_err(|e| format!("Failed to decode base64 for '{}': {}", path, e))?;
+        fs::write(&path, bytes)
+            .map_err(|e| format!("Failed to write file '{}': {}", path, e))
+    })
+}
+
+#[tauri::command]
 pub fn list_directory(path: String) -> Result<Vec<FileNode>, String> {
     run_guarded("list_directory", || {
         let p = Path::new(&path);
@@ -891,6 +908,7 @@ fn build_tree(dir: &Path, depth: usize, max_depth: usize) -> Result<Vec<FileNode
         // fail to match Rust-returned `\` paths.
         let path_str = entry_path.to_string_lossy().replace('\\', "/");
         let is_dir = entry_path.is_dir();
+        let added_ms = file_added_ms(&entry_path);
 
         let children = if is_dir {
             let kids = build_tree(&entry_path, depth + 1, max_depth)?;
@@ -907,11 +925,19 @@ fn build_tree(dir: &Path, depth: usize, max_depth: usize) -> Result<Vec<FileNode
             name,
             path: path_str,
             is_dir,
+            added_ms,
             children,
         });
     }
 
     Ok(nodes)
+}
+
+fn file_added_ms(path: &Path) -> Option<u64> {
+    let metadata = fs::metadata(path).ok()?;
+    let created = metadata.created().or_else(|_| metadata.modified()).ok()?;
+    let ms = created.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+    Some(ms)
 }
 
 #[tauri::command]
