@@ -18,8 +18,253 @@ import { parseMomentCommand, parseReviewCommand, type ReviewCommand } from "./sl
 // Store the page mapping from the last query so SourceFilesBar can show which pages were cited
 export let lastQueryPages: MessageReference[] = []
 
+function pad2(n: number): string {
+  return String(n).padStart(2, "0")
+}
+
 function todayIsoDate(): string {
-  return new Date().toISOString().slice(0, 10)
+  // Use local date (not UTC) so daily journal/review files align with
+  // the user's calendar day in their own timezone.
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = pad2(now.getMonth() + 1)
+  const d = pad2(now.getDate())
+  return `${y}-${m}-${d}`
+}
+
+function startOfToday(): Date {
+  const now = new Date()
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate())
+}
+
+function parseLocalDate(dateText: string): Date {
+  const [y, m, d] = dateText.split("-").map((v) => Number(v))
+  return new Date(y, m - 1, d)
+}
+
+function dayRangeFromIsoDate(dateText: string): { startMs: number; endMs: number } {
+  const start = parseLocalDate(dateText)
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1)
+  return { startMs: start.getTime(), endMs: end.getTime() }
+}
+
+function monthRangeFromIsoMonth(monthText: string): { startMs: number; endMs: number } {
+  const [y, m] = monthText.split("-").map((v) => Number(v))
+  const start = new Date(y, m - 1, 1)
+  const end = new Date(y, m, 1)
+  return { startMs: start.getTime(), endMs: end.getTime() }
+}
+
+interface QuarterInfo {
+  label: string
+  start: string
+  end: string
+  startMs: number
+  endMsExclusive: number
+  months: string[]
+}
+
+function parseIsoQuarter(quarterText: string): { year: number; quarter: number } | null {
+  const m = quarterText.match(/^(\d{4})-Q([1-4])$/)
+  if (!m) return null
+  return { year: Number(m[1]), quarter: Number(m[2]) }
+}
+
+function formatIsoDate(date: Date): string {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+}
+
+function buildQuarterInfo(quarterText?: string): QuarterInfo {
+  const now = new Date()
+  const parsed = quarterText ? parseIsoQuarter(quarterText) : null
+  const year = parsed?.year ?? now.getFullYear()
+  const quarter = parsed?.quarter ?? Math.floor(now.getMonth() / 3) + 1
+  const startMonth = (quarter - 1) * 3
+  const startDate = new Date(year, startMonth, 1)
+  const endExclusive = new Date(year, startMonth + 3, 1)
+  const endDate = new Date(year, startMonth + 3, 0)
+  const months = [0, 1, 2].map((i) => `${year}-${pad2(startMonth + i + 1)}`)
+  return {
+    label: `${year}-Q${quarter}`,
+    start: formatIsoDate(startDate),
+    end: formatIsoDate(endDate),
+    startMs: startDate.getTime(),
+    endMsExclusive: endExclusive.getTime(),
+    months,
+  }
+}
+
+async function getQuarterlyNotes(projectPath: string, quarter: QuarterInfo): Promise<string> {
+  const pp = normalizePath(projectPath)
+  const sections = await Promise.all(
+    quarter.months.map(async (month) => {
+      const filePath = `${pp}/wiki/personal-growth/reflections/monthly-summary-${month}.md`
+      const content = await readFile(filePath).catch(() => "")
+      if (content.trim()) return `## ${month} 月复盘\n${content}`
+      return `## ${month} 月复盘\n（暂无记录）`
+    }),
+  )
+  return sections.join("\n\n---\n\n")
+}
+
+function extractSection(markdown: string, heading: string): string | null {
+  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const re = new RegExp(`^##\\s+${escaped}\\s*$([\\s\\S]*?)(?=^##\\s+|\\Z)`, "m")
+  const match = markdown.match(re)
+  if (!match) return null
+  const body = match[1].trim()
+  return body.length > 0 ? body : null
+}
+
+function fallbackReviewTemplate(command: ReviewCommand): string {
+  if (command === "daily") {
+    return [
+      "## 1）今日三件推进",
+      "- ",
+      "- ",
+      "- ",
+      "",
+      "## 2）卡点与根因",
+      "- ",
+      "",
+      "## 3）情绪与能量",
+      "- ",
+      "",
+      "## 4）明日最小行动（<=3条）",
+      "- ",
+      "- ",
+      "- ",
+      "",
+      "## 5）一句追问（仅一个问题）",
+      "- ",
+    ].join("\n")
+  }
+  if (command === "weekly") {
+    return [
+      "## 1）本周关键进展",
+      "- ",
+      "- ",
+      "",
+      "## 2）偏差与风险",
+      "- ",
+      "",
+      "## 3）下周优先级（<=3条）",
+      "- ",
+      "- ",
+      "- ",
+      "",
+      "## 4）一句追问（仅一个问题）",
+      "- ",
+    ].join("\n")
+  }
+  if (command === "quarterly") {
+    return [
+      "## 1）这个季度用一句话定义",
+      "- ",
+      "",
+      "## 2）三个月的轨迹",
+      "- ",
+      "",
+      "## 3）now页面校准",
+      "- ",
+      "",
+      "## 4）成长了什么",
+      "- ",
+      "",
+      "## 5）下季度最重要的一个赌注",
+      "- ",
+      "",
+      "## 6）一句追问（仅一个问题）",
+      "- ",
+    ].join("\n")
+  }
+  return [
+    "## 1）本月关键产出",
+    "- ",
+    "- ",
+    "",
+    "## 2）模式与教训",
+    "- ",
+    "",
+    "## 3）下月焦点（<=3条）",
+    "- ",
+    "- ",
+    "- ",
+    "",
+    "## 4）一句追问（仅一个问题）",
+    "- ",
+  ].join("\n")
+}
+
+function resolveReviewTemplate(reviewCommands: string, command: ReviewCommand): string {
+  const wantedHeading =
+    command === "daily"
+      ? "每日复盘"
+      : command === "weekly"
+        ? "每周复盘"
+        : command === "monthly"
+          ? "每月总结"
+          : "每季度复盘"
+  const fromSection = extractSection(reviewCommands, wantedHeading)
+  if (fromSection) return fromSection
+  return fallbackReviewTemplate(command)
+}
+
+function defaultReviewSystemDoc(): string {
+  return [
+    "# 复盘系统",
+    "",
+    "## 原则",
+    "- 真实优先：如实描述发生了什么，不自我粉饰。",
+    "- 可执行优先：每次复盘产出可落地的下一步动作。",
+    "- 小步迭代：关注可持续改进，而非一次性完美。",
+    "",
+    "## 输出要求",
+    "- 严格遵守复盘指令模板的标题与顺序。",
+    "- 当信息不足时，在对应条目写“信息不足”。",
+    "- 追问必须只有一个问题，且不提供答案。",
+  ].join("\n")
+}
+
+function defaultReviewCommandsDoc(): string {
+  return [
+    "# 复盘指令",
+    "",
+    "## 每日复盘",
+    fallbackReviewTemplate("daily"),
+    "",
+    "## 每周复盘",
+    fallbackReviewTemplate("weekly"),
+    "",
+    "## 每月总结",
+    fallbackReviewTemplate("monthly"),
+    "",
+    "## 每季度复盘",
+    fallbackReviewTemplate("quarterly"),
+  ].join("\n")
+}
+
+async function ensureReviewDocs(projectPath: string): Promise<{ reviewSystem: string; reviewCommands: string }> {
+  const pp = normalizePath(projectPath)
+  const baseDir = `${pp}/wiki/personal-growth`
+  const systemPath = `${baseDir}/review-system.md`
+  const commandsPath = `${baseDir}/review-commands.md`
+
+  await createDirectory(baseDir).catch(() => {})
+
+  let reviewSystem = await readFile(systemPath).catch(() => "")
+  if (!reviewSystem.trim()) {
+    reviewSystem = defaultReviewSystemDoc()
+    await writeFsFile(systemPath, reviewSystem)
+  }
+
+  let reviewCommands = await readFile(commandsPath).catch(() => "")
+  if (!reviewCommands.trim()) {
+    reviewCommands = defaultReviewCommandsDoc()
+    await writeFsFile(commandsPath, reviewCommands)
+  }
+
+  return { reviewSystem, reviewCommands }
 }
 
 function isoWeekLabel(date: Date): string {
@@ -123,36 +368,79 @@ async function autoSaveReviewResult(
   projectPath: string,
   command: ReviewCommand,
   content: string,
+  targetDate?: string,
+  targetMonth?: string,
+  targetQuarter?: string,
 ): Promise<string> {
   const pp = normalizePath(projectPath)
   const now = new Date()
-  const date = todayIsoDate()
-  const ym = date.slice(0, 7)
-  const week = isoWeekLabel(now)
-  const baseDir = command === "daily" ? `${pp}/wiki/personal-growth/journal` : `${pp}/wiki/personal-growth/reflections`
+  const today = todayIsoDate()
+  const dailyDate = targetDate ?? today
+  const ym = targetMonth ?? (targetDate ? targetDate.slice(0, 7) : today.slice(0, 7))
+  const quarter = buildQuarterInfo(targetQuarter)
+  const week = isoWeekLabel(targetDate ? parseLocalDate(targetDate) : now)
+  const baseDir = `${pp}/wiki/personal-growth/reflections`
+
+  if (command === "daily") {
+    const journalPath = momentPagePath(projectPath, dailyDate)
+    const journalDir = `${pp}/wiki/personal-growth/journal`
+    await createDirectory(journalDir).catch(() => {})
+    const existing = await readFile(journalPath).catch(() => "")
+    const nowLabel = `${dailyDate === today ? "复盘于" : "补写于"} ${today} ${clockLabel(now)}`
+    const reviewSection = [
+      "## 每日复盘",
+      "",
+      `> ${nowLabel}`,
+      "",
+      content.trim(),
+      "",
+    ].join("\n")
+
+    const next = existing.trim()
+      ? `${existing.trimEnd()}\n\n---\n\n${reviewSection}`
+      : [
+          "---",
+          "type: journal",
+          `title: "此时此刻 ${dailyDate}"`,
+          `created: ${dailyDate}`,
+          `updated: ${today}`,
+          "source_signal: conversation_crystallized",
+          "status: active",
+          "tags: [moment, journal, review]",
+          "---",
+          "",
+          `# 此时此刻 ${dailyDate}`,
+          "",
+          reviewSection,
+        ].join("\n")
+
+    await writeFsFile(journalPath, next)
+    return journalPath
+  }
+
   await createDirectory(baseDir).catch(() => {})
 
   const fileName =
-    command === "daily"
-      ? `daily-review-${date}.md`
-      : command === "weekly"
+    command === "weekly"
       ? `weekly-review-${week}.md`
-      : `monthly-summary-${ym}.md`
+      : command === "monthly"
+        ? `monthly-summary-${ym}.md`
+        : `quarterly-review-${quarter.label}.md`
 
   const title =
-    command === "daily"
-      ? `每日复盘 ${date}`
-      : command === "weekly"
+    command === "weekly"
       ? `每周复盘 ${week}`
-      : `每月总结 ${ym}`
+      : command === "monthly"
+        ? `每月总结 ${ym}`
+        : `每季度复盘 ${quarter.label}`
 
-  const pageType = command === "daily" ? "note" : "synthesis"
+  const pageType = "synthesis"
   const frontmatter = [
     "---",
     `type: ${pageType}`,
     `title: "${title}"`,
-    `created: ${date}`,
-    `updated: ${date}`,
+    `created: ${today}`,
+    `updated: ${today}`,
     `source_signal: conversation_crystallized`,
     `status: active`,
     `tags: [review]`,
@@ -341,28 +629,57 @@ export function ChatPanel() {
 
       const reviewCommand = parseReviewCommand(text)
       if (reviewCommand && project) {
+        const today = todayIsoDate()
+        const reviewDate = reviewCommand.targetDate ?? today
+        const reviewMonth = reviewCommand.targetMonth ?? today.slice(0, 7)
+        const reviewQuarter = buildQuarterInfo(reviewCommand.targetQuarter)
         let notes = ""
-        if (reviewCommand === "daily") {
-          const momentsPath = momentPagePath(project.path, todayIsoDate())
+        if (reviewCommand.command === "quarterly") {
+          notes = await getQuarterlyNotes(project.path, reviewQuarter)
+        } else if (reviewCommand.command === "daily") {
+          const momentsPath = momentPagePath(project.path, reviewDate)
           notes = await readFile(momentsPath).catch(() => "")
         }
         if (!notes) {
+          const { startMs, endMs } =
+            reviewCommand.command === "daily"
+              ? dayRangeFromIsoDate(reviewDate)
+              : reviewCommand.command === "monthly"
+                ? monthRangeFromIsoMonth(reviewMonth)
+              : reviewCommand.command === "quarterly"
+                ? { startMs: reviewQuarter.startMs, endMs: reviewQuarter.endMsExclusive }
+              : { startMs: startOfToday().getTime(), endMs: Number.POSITIVE_INFINITY }
           const activeConvMessages = useChatStore.getState().getActiveMessages()
-            .filter((m) => m.role === "user" || m.role === "assistant")
+            .filter(
+              (m) =>
+                (m.role === "user" || m.role === "assistant") &&
+                m.timestamp >= startMs &&
+                m.timestamp < endMs,
+            )
           notes = activeConvMessages
-            .filter((m) => m.content.trim() !== "/每日复盘" && m.content.trim() !== "/每周复盘" && m.content.trim() !== "/每月总结")
+            .filter((m) => {
+              const trimmed = m.content.trim()
+              return (
+                !trimmed.startsWith("/每日复盘") &&
+                trimmed !== "/每周复盘" &&
+                !trimmed.startsWith("/每月总结") &&
+                !trimmed.startsWith("/每季度复盘")
+              )
+            })
             .map((m) => `${m.role === "user" ? "我" : "助手"}: ${m.content}`)
             .join("\n\n")
         }
 
         const cmdTitle =
-          reviewCommand === "daily" ? "每日复盘" : reviewCommand === "weekly" ? "每周复盘" : "每月总结"
-        const templatePath = `${normalizePath(project.path)}/wiki/personal-growth/review-commands.md`
-        const systemPath = `${normalizePath(project.path)}/wiki/personal-growth/review-system.md`
-        const [reviewSystem, reviewCommands] = await Promise.all([
-          readFile(systemPath).catch(() => ""),
-          readFile(templatePath).catch(() => ""),
-        ])
+          reviewCommand.command === "daily"
+            ? `每日复盘${reviewCommand.targetDate ? `（${reviewCommand.targetDate}）` : ""}`
+            : reviewCommand.command === "weekly"
+              ? "每周复盘"
+              : reviewCommand.command === "monthly"
+                ? `每月总结${reviewCommand.targetMonth ? `（${reviewCommand.targetMonth}）` : ""}`
+                : `每季度复盘${reviewCommand.targetQuarter ? `（${reviewCommand.targetQuarter}）` : ""}`
+        const { reviewSystem, reviewCommands } = await ensureReviewDocs(project.path)
+        const strictTemplate = resolveReviewTemplate(reviewCommands, reviewCommand.command)
 
         const controller = new AbortController()
         abortRef.current = controller
@@ -376,8 +693,14 @@ export function ChatPanel() {
                 "你是用户的复盘诤友。严格按给定模板输出，不要额外解释。",
                 "当记录不足时，也要按模板输出，并在对应字段写“信息不足”。",
                 "追问必须只有一个问题，且不提供答案或建议。",
+                "你必须严格遵守下方“输出模板骨架”：",
+                "- 保留全部标题及顺序，不得改写标题文字。",
+                "- 不得新增标题，不得删除标题。",
+                "- 只能在每个标题下填写内容。",
                 reviewSystem ? `## Review System\n${reviewSystem}` : "",
-                reviewCommands ? `## Review Commands\n${reviewCommands}` : "",
+                "## 输出模板骨架",
+                strictTemplate,
+                reviewCommands ? `## Review Commands（参考）\n${reviewCommands}` : "",
               ].filter(Boolean).join("\n\n"),
             },
             {
@@ -385,7 +708,15 @@ export function ChatPanel() {
               content: [
                 `请执行：${cmdTitle}`,
                 "",
-                "以下是我当前会话里的碎片记录，请据此生成复盘：",
+                `目标日期：${
+                  reviewCommand.command === "monthly"
+                    ? reviewMonth
+                    : reviewCommand.command === "quarterly"
+                      ? `${reviewQuarter.start} ~ ${reviewQuarter.end} (${reviewQuarter.label})`
+                      : reviewDate
+                }`,
+                "",
+                "以下是该日期范围内的碎片记录，请据此生成复盘：",
                 notes || "(暂无记录)",
               ].join("\n"),
             },
@@ -399,7 +730,14 @@ export function ChatPanel() {
               finalizeStream(accumulated)
               abortRef.current = null
               try {
-                const written = await autoSaveReviewResult(project.path, reviewCommand, accumulated)
+                const written = await autoSaveReviewResult(
+                  project.path,
+                  reviewCommand.command,
+                  accumulated,
+                  reviewCommand.targetDate,
+                  reviewCommand.targetMonth,
+                  reviewCommand.targetQuarter,
+                )
                 const tree = await listDirectory(normalizePath(project.path))
                 setFileTree(tree)
                 useWikiStore.getState().bumpDataVersion()
